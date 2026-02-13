@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Select A Club</title>
+        <style>
+            html {
+                height: 100%;
+                margin: 0;
+                padding: 0;
+                font-size: 20px
+            }
+
+            body {
+                background-color: #d9d9d9;
+                font-family: "Consolas", monospace;
+                text-align: center;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+
+            .main-container {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+            }
+
+            /* Select A Club Container */
+            h1 {
+                background-color: #505050;
+                color: white;
+                display: inline-block;
+                padding: 5px 15px;
+                border-radius: 10px;
+                margin-top: 15px;
+                margin-bottom: 30px;
+            }
+
+            .selected-player {
+                font-size: 20px; 
+                font-weight: none; 
+                font-style: italic;
+                color: #505050; 
+                font-family: "Consolas", monospace;
+                margin-top: -10px;
+            }
+            
+            .club-buttons {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: center;
+                margin: 30px auto;
+                gap: 30px;
+                max-width: 850px;
+            }
+
+            .club-container {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+            }
+
+            /* Club Button */
+            .club {
+                width: 90px;
+                height: 90px;
+                background-color: #505050;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            }
+
+            .club:hover{
+                background-color: white;
+            }
+            
+            /* D, 3w, 5w, etc. Label */
+            .club span {
+                color: #7ED957;
+                font-size: 2.3rem;
+                font-weight: bold;
+            }
+
+            /* Driver, 3 Wood, 5 Wood, etc. Label */
+            .label {
+                font-size: 0.8rem;
+                font-weight: bold;
+                color: black;
+                line-height: 0.5;
+                margin-top: 10px;
+            }
+
+            .back-button {
+                background-color: #505050;
+                color: #7ED957;
+                font-weight: bold;
+                padding: 10px 25px;
+                border: none;
+                border-radius: 10px;
+                cursor: pointer;
+                font-size: 0.8rem;
+            }
+
+            .back-container {
+                width: 100%;
+                margin-top: 50px;
+                text-align: center;
+            }
+
+            .back-button:hover {
+                background-color: white;
+            }
+
+            a {
+                text-decoration: none;
+                color: inherit;
+            }
+
+        </style>
+    </head>
+    <body>
+        <div class="main-container">
+            <h1>SELECT A CLUB</h1>
+
+            {% if player_name %}
+                <p class="selected-player">
+                    {{ player_name }} is now playing
+                </p>
+            {% endif %}
+
+            <div class="club-buttons">
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='Driver')}}">
+                    <div class="club">
+                        <span>D</span>
+                    </div>
+                    <div class="label">DRIVER</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='3 Wood')}}">
+                    <div class="club">
+                        <span>3w</span>
+                    </div>
+                    <div class="label">3 WOOD</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='5 Wood')}}">
+                    <div class="club">
+                        <span>5w</span>
+                    </div>
+                    <div class="label">5 WOOD</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='3 Hybrid')}}">
+                    <div class="club">
+                        <span>3h</span>
+                    </div>
+                    <div class="label">3 HYBRID</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='4 Hybrid')}}">
+                    <div class="club">
+                        <span>4h</span>
+                    </div>
+                    <div class="label">4 HYBRID</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='3 Iron')}}">
+                    <div class="club">
+                        <span>3i</span>
+                    </div>
+                    <div class="label">3 IRON</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='4 Iron')}}">
+                    <div class="club">
+                        <span>4i</span>
+                    </div>
+                    <div class="label">4 IRON</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='5 Iron')}}">
+                    <div class="club">
+                        <span>5i</span>
+                    </div>
+                    <div class="label">5 IRON</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='6 Iron')}}">
+                    <div class="club">
+                        <span>6i</span>
+                    </div>
+                    <div class="label">6 IRON</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='7 Iron')}}">
+                    <div class="club">
+                        <span>7i</span>
+                    </div>
+                    <div class="label">7 IRON</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='8 Iron')}}">
+                    <div class="club">
+                        <span>8i</span>
+                    </div>
+                    <div class="label">8 IRON</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='9 Iron')}}">
+                    <div class="club">
+                        <span>9i</span>
+                    </div>
+                    <div class="label">9 IRON</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='Pitching Wedge')}}">
+                    <div class="club">
+                        <span>PW</span>
+                    </div>
+                    <div class="label">PITCHING</div>
+                    <div class="label">WEDGE</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='Gap Wedge')}}">
+                    <div class="club">
+                        <span>GW</span>
+                    </div>
+                    <div class="label">GAP</div>
+                    <div class="label">WEDGE</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='Sand Wedge')}}">
+                    <div class="club">
+                        <span>SW</span>
+                    </div>
+                    <div class="label">SAND</div>
+                    <div class="label">WEDGE</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='Lob Wedge')}}">
+                    <div class="club">
+                        <span>LW</span>
+                    </div>
+                    <div class="label">LOB</div>
+                    <div class="label">WEDGE</div>
+                </a>
+                </div>
+
+                <div class="club-container">
+                <a href="{{url_for('select_gameplay_club', club='Putter')}}">
+                    <div class="club">
+                        <span>P</span>
+                    </div>
+                    <div class="label">PUTTER</div>
+                </a>
+                </div>
+            </div>
+
+            <div class="back-container">
+                <a href="{{ url_for('whos_playing') }}">
+                    <button class="back-button">&#8592 BACK</button>
+                </a>
+            </div>
+        </div>
+    </body>
+</html>
