@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Swing Metrics</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #d9d9d9;
+            color: black;
+            text-align: center;
+            margin: 0;
+            padding: 40px;
+        }
+
+        h1 {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 28px;
+            color: #7ED957;
+            margin-bottom: 40px;
+        }
+
+        .metrics-container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            max-width: 800px;
+            margin: auto;
+        }
+
+        .metric-card {
+            background-color: #505050;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0px 4px 10px rgba(0,0,0,0.4);
+        }
+
+        .metric-title {
+            font-size: 18px;
+            color: #7ED957;
+        }
+
+        .metric-value {
+            font-size: 36px;
+            font-weight: bold;
+            color: white;
+            margin-top: 10px;
+        }
+
+        .back-btn {
+            margin-top: 50px;
+            padding: 12px 25px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            background-color: #444;
+            color: white;
+            cursor: pointer;
+        }
+
+        .back-btn:hover {
+            background-color: #666;
+        }
+
+    </style>
+</head>
+<body>
+
+    <h1>{{ player_name }}</h1>
+    <h2>{{ club }}</h2>
+
+    <div class="metrics-container">
+
+        {% for key, value in metrics.items() %}
+        <div class="metric-card">
+            <div class="metric-title">
+                {{ key.replace('_', ' ').title() }}
+            </div>
+            <div class="metric-value">
+                {{ value }}
+            </div>
+        </div>
+        {% endfor %}
+
+    </div>
+
+    <form action="{{ url_for('back_to_players') }}">
+        <button class="back-btn">Back to Players</button>
+    </form>
+
+</body>
+</html>
