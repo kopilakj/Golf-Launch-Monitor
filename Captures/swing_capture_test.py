@@ -22,7 +22,7 @@ CHANGED_PIXELS_THRESHOLD = 2500
 MIN_CONSECUTIVE = 2
 
 ANALOGUE_GAIN = 4.0
-EXPOSURE_US = 1000
+EXPOSURE_US = 994
 BUFFER_COUNT = 4
 
 SAVE_DIR_NAME = "raw_burst"
@@ -55,7 +55,7 @@ def main():
     picam2.set_controls(
         {
             "FrameDurationLimits": (frame_us, frame_us),
-            "ExposureTime": min(EXPOSURE_US, frame_us),
+            "ExposureTime": EXPOSURE_US,
             "AnalogueGain": ANALOGUE_GAIN,
         }
     )
