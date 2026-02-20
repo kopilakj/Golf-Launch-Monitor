@@ -1,0 +1,39 @@
+The base of the camera frame (not the lens) is positioned 6in off the ground. 
+The lens of the camera frame is positioned ~7.125in off the ground. 
+
+Roughly the center of the ball is positioned (x inches) from the camera:
+
+~32in: Diameter in pixels is ~24px
+
+
+~37in: Diameter in pixels is ~22px
+
+# --- Editable settings ---
+SIZE = (640, 400)
+TARGET_FPS = 300
+PRE_FRAMES = 20
+POST_FRAMES = 25
+
+WARMUP_SEC = 1.0
+MAX_WAIT_SEC = 0 # Timeout 
+
+ROI = (210, 250, 160, 100) # default is (0, 220, 640, 120)  # x, y, w, h
+PIXEL_DIFF_THRESH = 10
+CHANGED_PIXELS_THRESHOLD = 150
+MIN_CONSECUTIVE = 2
+
+ANALOGUE_GAIN = 4.0
+EXPOSURE_US = 994
+BUFFER_COUNT = 4
+
+SAVE_DIR_NAME = "raw_burst"
+SAVE_FRAMES = True
+SAVE_STATS = True
+COPY_FRAMES = True
+
+
+
+~43in: Diameter in pixels is ~19px
+
+The ball should be positioned slightly left in the frame so as to capture
+more frames with more clubs. 

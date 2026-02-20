@@ -10,15 +10,15 @@ from picamera2 import Picamera2
 # --- Editable settings ---
 SIZE = (640, 400)
 TARGET_FPS = 300
-PRE_FRAMES = 30
-POST_FRAMES = 90
+PRE_FRAMES = 20
+POST_FRAMES = 25
 
 WARMUP_SEC = 1.0
-MAX_WAIT_SEC = 10.0
+MAX_WAIT_SEC = 0 # Timeout 
 
-ROI = (0, 220, 640, 120)  # x, y, w, h
-PIXEL_DIFF_THRESH = 15
-CHANGED_PIXELS_THRESHOLD = 2500
+ROI = (210, 250, 160, 100) # default is (0, 220, 640, 120)  # x, y, w, h
+PIXEL_DIFF_THRESH = 10
+CHANGED_PIXELS_THRESHOLD = 150
 MIN_CONSECUTIVE = 2
 
 ANALOGUE_GAIN = 4.0
@@ -31,11 +31,11 @@ SAVE_STATS = True
 COPY_FRAMES = True
 
 
-def _timestamp_ns(meta):
+def _timestamp_us(meta):
     ts = None
     if meta is not None:
         ts = meta.get("SensorTimestamp")
-    return int(ts) if ts is not None else time.monotonic_ns()
+    return int(ts // 1000) if ts is not None else time.monotonic_ns() // 1000
 
 
 def main():
@@ -143,10 +143,10 @@ def main():
         stats_path = save_dir / "burst_meta.csv"
         with stats_path.open("w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["frame_idx", "timestamp_ns", "phase", "trigger_changed"])
+            writer.writerow(["frame_idx", "timestamp_us", "phase", "trigger_changed"])
             for i, meta in enumerate(captured_meta):
                 phase = "pre" if i < trigger_index else "post"
-                writer.writerow([i, _timestamp_ns(meta), phase, trigger_changed])
+                writer.writerow([i, _timestamp_us(meta), phase, trigger_changed])
 
     print("Done.")
 
