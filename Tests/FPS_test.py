@@ -4,7 +4,7 @@
 from picamera2 import Picamera2
 import time
 
-SIZE = (640, 400)
+SIZE = (320, 240)
 TARGET_FPS = 300
 DURATION_SEC = 2.0
 
