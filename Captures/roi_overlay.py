@@ -1,7 +1,7 @@
 import cv2
 # --- edit these ---
 IMAGE_PATH = "pov_test.png"
-ROI = (210, 250, 160, 100)  # x, y, w, h
+ROI = (210, 250, 160, 50)  # x, y, w, h
 OUT_PATH = "ROI_test_image.png"
 # -------------------
 img = cv2.imread(IMAGE_PATH)
