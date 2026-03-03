@@ -6,24 +6,28 @@ import numpy as np
 # ---- CONFIG ----
 FRAMES_DIR = Path("/home/jkopila1/project/Golf-Launch-Monitor/Captures/raw_burst")
 META_CSV = FRAMES_DIR / "burst_meta.csv"
-OUT_TRACK = FRAMES_DIR / "ball_track.csv"
-OUT_METRICS = FRAMES_DIR / "metrics.csv"
+OUT_TRACK = Path("/home/jkopila1/project/Golf-Launch-Monitor/Calculations/ball_track.csv")
+OUT_METRICS = Path("/home/jkopila1/project/Golf-Launch-Monitor/Calculations/metrics.csv")
 W, H = 640, 400  # frame size
-# Crop: right 2/3, top 2/3
+# Crop: right-ish, bottom half (adjusted to avoid overhead lights)
 CROP_X = W // 6
-CROP_Y = 0
-CROP_W = W 
-CROP_H = (3 * H) // 4
+CROP_Y = H // 2
+CROP_W = W - CROP_X
+CROP_H = H // 2
 # Ball detection params (tune later)
 AREA_MIN = 150
 AREA_MAX = 1000
-CIRC_MIN = 0.4
-BLUR_K = 3  # 3x3 blur
-# Metrics params
-LAUNCH_WINDOW_FRAMES = 8  # number of early frames for launch metrics
+CIRC_MIN = 0.2
+BLUR_K = 5
+# Launch detection params
+STABLE_WINDOW = 5
+STABLE_TOL_PX = 2
+LAUNCH_THRESHOLD_PX = 5
+LAUNCH_CONFIRM_FRAMES = 2
+POST_LAUNCH_FRAMES = 5
 # Debug overlay
 DEBUG_OVERLAY = True
-DEBUG_DIR = FRAMES_DIR / "debug_overlay"
+DEBUG_DIR = Path("/home/jkopila1/project/Golf-Launch-Monitor/Calculations/debug_overlay")
 # ----------------
 def load_timestamps(meta_path):
     ts = {}
@@ -71,21 +75,71 @@ def find_ball(frame_gray, last_center=None):
             best_score = score
             best = (fx, fy, area, circ)
     return best  # (cx, cy, area, circ) or None
+def find_rest_window(valid_rows):
+    # valid_rows: list of (idx, t_us, cx, cy)
+    for i in range(0, len(valid_rows) - STABLE_WINDOW + 1):
+        window = valid_rows[i:i + STABLE_WINDOW]
+        xs = [r[2] for r in window]
+        ys = [r[3] for r in window]
+        cx_rest = float(np.median(xs))
+        cy_rest = float(np.median(ys))
+        dmax = 0.0
+        for r in window:
+            dx = r[2] - cx_rest
+            dy = r[3] - cy_rest
+            d = math.hypot(dx, dy)
+            if d > dmax:
+                dmax = d
+        if dmax <= STABLE_TOL_PX:
+            return i, (cx_rest, cy_rest)
+    return None, None
+def find_launch_index(valid_rows, rest_idx_end, rest_center):
+    # valid_rows: list of (idx, t_us, cx, cy)
+    for j in range(rest_idx_end + 1, len(valid_rows) - LAUNCH_CONFIRM_FRAMES):
+        dx = valid_rows[j][2] - rest_center[0]
+        dy = valid_rows[j][3] - rest_center[1]
+        d = math.hypot(dx, dy)
+        if d < LAUNCH_THRESHOLD_PX:
+            continue
+        # confirm next few frames also above threshold
+        ok = True
+        for k in range(1, LAUNCH_CONFIRM_FRAMES + 1):
+            dxk = valid_rows[j + k][2] - rest_center[0]
+            dyk = valid_rows[j + k][3] - rest_center[1]
+            dk = math.hypot(dxk, dyk)
+            if dk < LAUNCH_THRESHOLD_PX:
+                ok = False
+                break
+        if ok:
+            return j
+    return None
 def compute_metrics(track_rows):
     # track_rows: list of (idx, t_us, cx, cy, valid)
-    valid = [r for r in track_rows if r[4] == 1]
-    if len(valid) < 2:
+    valid = [r for r in track_rows if r[4] == 1 and r[1] is not None]
+    if len(valid) < STABLE_WINDOW + POST_LAUNCH_FRAMES:
         return None
     valid.sort(key=lambda r: r[0])
+    rest_start_idx, rest_center = find_rest_window(valid)
+    if rest_center is None:
+        print("No stable rest window found.")
+        return None
+    rest_end_idx = rest_start_idx + STABLE_WINDOW - 1
+    launch_idx = find_launch_index(valid, rest_end_idx, rest_center)
+    if launch_idx is None:
+        print("No launch frame found.")
+        return None
+    post = valid[launch_idx: launch_idx + POST_LAUNCH_FRAMES]
+    if len(post) < 2:
+        return None
     vxs, vys, speeds = [], [], []
-    for i in range(1, len(valid)):
-        t0 = valid[i-1][1] / 1e6
-        t1 = valid[i][1] / 1e6
+    for i in range(1, len(post)):
+        t0 = post[i-1][1] / 1e6
+        t1 = post[i][1] / 1e6
         dt = t1 - t0
         if dt <= 0:
             continue
-        dx = valid[i][2] - valid[i-1][2]
-        dy = valid[i][3] - valid[i-1][3]
+        dx = post[i][2] - post[i-1][2]
+        dy = post[i][3] - post[i-1][3]
         vx = dx / dt
         vy = dy / dt
         vxs.append(vx)
@@ -93,23 +147,22 @@ def compute_metrics(track_rows):
         speeds.append(math.hypot(vx, vy))
     if not speeds:
         return None
-    n = min(LAUNCH_WINDOW_FRAMES, len(speeds))
-    speed_med = float(np.median(speeds[:n]))
-    vx_med = float(np.median(vxs[:n]))
-    vy_med = float(np.median(vys[:n]))
+    speed_med = float(np.median(speeds))
+    vx_med = float(np.median(vxs))
+    vy_med = float(np.median(vys))
     launch_angle_deg = math.degrees(math.atan2(-vy_med, vx_med))
-    cy0 = valid[0][3]
-    apex_y = min([r[3] for r in valid])
-    apex_height_px = cy0 - apex_y
-    cx0 = valid[0][2]
-    cx_last = valid[-1][2]
-    carry_px = cx_last - cx0
+    # Apex relative to rest center, using post-launch frames
+    apex_y = min([r[3] for r in post])
+    apex_height_px = rest_center[1] - apex_y
+    carry_px = post[-1][2] - rest_center[0]
     return {
         "ball_speed_pxps": speed_med,
         "launch_angle_deg": launch_angle_deg,
         "apex_height_px": apex_height_px,
         "carry_px": carry_px,
         "valid_frames": len(valid),
+        "rest_frame_idx": valid[rest_start_idx][0],
+        "launch_frame_idx": valid[launch_idx][0],
     }
 def main():
     ts = load_timestamps(META_CSV)
@@ -132,7 +185,6 @@ def main():
             last_center = (cx, cy)
         if DEBUG_OVERLAY:
             vis = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            # Draw crop box
             cv2.rectangle(
                 vis,
                 (CROP_X, CROP_Y),
