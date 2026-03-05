@@ -1,2 +1,2 @@
-ball_speed_pxps,launch_angle_deg,apex_height_px,carry_px,valid_frames
-287.8526194508357,-0.0,0,0,8
+ball_speed_pxps,launch_angle_deg,apex_height_px,carry_px,post_launch_frames,vx_pxps,vy_pxps,rest_frame_idx,launch_frame_idx
+144.01,-0.0,0.0,0.0,5,0.0,0.0,4,19
