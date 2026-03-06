@@ -1,5 +1,5 @@
 import socket
-SENSOR_IP = "192.168.1.50.2"   # replace with your Sensor Pi ethernet IP
+SENSOR_IP = "192.168.50.2"   # replace with your Sensor Pi ethernet IP
 PORT = 5001
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.connect((SENSOR_IP, PORT))
