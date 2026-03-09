@@ -2,6 +2,7 @@ from flask import Flask, redirect, url_for, render_template, session, request, f
 import sqlite3
 import os
 import json
+import requests
 
 app = Flask(__name__)
 app.secret_key = "dev"
@@ -10,6 +11,41 @@ os.makedirs(UPLOAD_FOLDER, exist_ok = True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'json'}
 latest_metrics = {}
+
+# =============================================================================
+# SENSOR BRIDGE CONFIGURATION
+# =============================================================================
+# The sensor_bridge.py runs on port 5001 and handles communication with Sensor Pi
+BRIDGE_URL = "http://127.0.0.1:5001"
+
+
+def notify_bridge_club_selected(club: str) -> bool:
+    """
+    Notify the sensor bridge when a club is selected.
+    This sends the CLUB_PRESET to Sensor Pi.
+    
+    Returns True if successful, False otherwise.
+    """
+    try:
+        response = requests.post(
+            f"{BRIDGE_URL}/set_club",
+            json={"club": club},
+            timeout=5
+        )
+        if response.status_code == 200:
+            result = response.json()
+            print(f"[App] Bridge notified of club {club}: {result}")
+            return result.get("success", False)
+        else:
+            print(f"[App] Bridge returned status {response.status_code}")
+            return False
+    except requests.exceptions.ConnectionError:
+        print(f"[App] Could not connect to bridge at {BRIDGE_URL}")
+        print("[App] Make sure sensor_bridge.py is running!")
+        return False
+    except Exception as e:
+        print(f"[App] Error notifying bridge: {e}")
+        return False
 
 ## Get Database Connection
 def db_connection():
@@ -89,6 +125,14 @@ def select_club():
 @app.route("/select_gameplay_club/<path:club>")
 def select_gameplay_club(club):
     session["club"] = club
+    
+    # Notify the sensor bridge about the club selection
+    # This will send CLUB_PRESET to Sensor Pi
+    bridge_success = notify_bridge_club_selected(club)
+    if not bridge_success:
+        print(f"[App] Warning: Could not notify bridge about club {club}")
+        # Continue anyway - user can still see metrics page
+    
     return redirect(url_for("display_metrics"))
 
 @app.route("/back_to_players")
@@ -175,7 +219,7 @@ def delete_users():
     connection.close()
     return render_template("delete_users.html", players=players)
 
-## Upload Metrics
+## Upload Metrics (called by sensor_bridge.py when shot data arrives)
 @app.route("/api/upload_metrics", methods=["POST"])
 def api_upload_metrics():
     data = request.get_json()
@@ -186,6 +230,44 @@ def api_upload_metrics():
         json.dump(data, f)
 
     return jsonify({"status": "success"})
+
+
+## API endpoint to trigger a shot (for testing or future auto-trigger)
+@app.route("/api/trigger_shot", methods=["POST"])
+def api_trigger_shot():
+    """
+    Trigger a shot capture via the sensor bridge.
+    Call this when the sensor detects a swing.
+    """
+    try:
+        response = requests.post(
+            f"{BRIDGE_URL}/trigger",
+            timeout=30  # Shot capture can take time
+        )
+        return jsonify(response.json())
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "success": False, 
+            "error": "Bridge not running. Start sensor_bridge.py!"
+        }), 503
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+## API endpoint to check bridge/sensor status
+@app.route("/api/bridge_status", methods=["GET"])
+def api_bridge_status():
+    """Check if the sensor bridge and Sensor Pi are connected."""
+    try:
+        response = requests.get(f"{BRIDGE_URL}/status", timeout=5)
+        return jsonify(response.json())
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "bridge_running": False,
+            "error": "Bridge not running. Start sensor_bridge.py!"
+        }), 503
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 ## Display Metrics
 @app.route("/display_metrics")

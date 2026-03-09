@@ -66,6 +66,53 @@
             background-color: #666;
         }
 
+        .trigger-btn {
+            padding: 15px 40px;
+            font-size: 20px;
+            border: none;
+            border-radius: 12px;
+            background-color: #7ED957;
+            color: #333;
+            cursor: pointer;
+            font-weight: bold;
+            margin: 30px auto;
+            display: block;
+        }
+
+        .trigger-btn:hover {
+            background-color: #6bc948;
+        }
+
+        .trigger-btn:disabled {
+            background-color: #888;
+            cursor: not-allowed;
+        }
+
+        .status-text {
+            font-size: 14px;
+            color: #666;
+            margin-top: 10px;
+        }
+
+        .button-container {
+            margin-top: 40px;
+        }
+
+        .change-club-btn {
+            padding: 12px 25px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            background-color: #505050;
+            color: #7ED957;
+            cursor: pointer;
+            margin: 10px;
+        }
+
+        .change-club-btn:hover {
+            background-color: #666;
+        }
+
     </style>
 </head>
 <body>
@@ -88,9 +135,65 @@
 
     </div>
 
+<<<<<<< HEAD
+    <!-- Trigger Shot Button for Testing -->
+    <div class="button-container">
+        <button class="trigger-btn" id="triggerBtn" onclick="triggerShot()">
+            TRIGGER SHOT
+        </button>
+        <p class="status-text" id="statusText">Click to capture a new shot</p>
+    </div>
+
+    <div class="button-container">
+        <a href="{{ url_for('select_club') }}">
+            <button class="change-club-btn">Change Club</button>
+        </a>
+        <a href="{{ url_for('back_to_players') }}">
+            <button class="back-btn">Back to Players</button>
+        </a>
+    </div>
+
+    <script>
+        function triggerShot() {
+            const btn = document.getElementById('triggerBtn');
+            const status = document.getElementById('statusText');
+            
+            btn.disabled = true;
+            btn.textContent = 'CAPTURING...';
+            status.textContent = 'Waiting for Sensor Pi...';
+            
+            fetch('/api/trigger_shot', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    status.textContent = 'Shot captured! Refreshing...';
+                    // Reload page to show new metrics
+                    setTimeout(() => location.reload(), 500);
+                } else {
+                    status.textContent = 'Error: ' + (data.error || 'Unknown error');
+                    btn.disabled = false;
+                    btn.textContent = 'TRIGGER SHOT';
+                }
+            })
+            .catch(err => {
+                status.textContent = 'Error: ' + err.message;
+                btn.disabled = false;
+                btn.textContent = 'TRIGGER SHOT';
+            });
+        }
+
+        // Auto-refresh every 5 seconds to catch new shots
+        // (Comment out if you prefer manual refresh only)
+        // setInterval(() => location.reload(), 5000);
+    </script>
+=======
     <form action="{{ url_for('back_to_players') }}">
         <button class="back-btn">&#8592 BACK</button>
     </form>
+>>>>>>> 66090338b87d9d0d1777e1450a83129bd89926fa
 
 </body>
 </html>
