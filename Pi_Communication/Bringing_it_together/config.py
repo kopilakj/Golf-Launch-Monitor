@@ -21,8 +21,8 @@ For Ethernet (direct cable between Pis):
 # Option 1: Phone Hotspot Testing (update these when you connect)
 # Run 'hostname -I' on each Pi to find their IPs
 
-SENSOR_PI_IP = "CHANGE_ME"      # <-- Sensor Pi's IP on hotspot (e.g., "192.168.43.101")
-MAIN_PI_IP = "CHANGE_ME"        # <-- Main Pi's IP on hotspot (e.g., "192.168.43.102")
+SENSOR_PI_IP = "192.168.50.1"      # <-- Sensor Pi's IP on hotspot (e.g., "192.168.43.101")
+MAIN_PI_IP = "192.168.50.2"        # <-- Main Pi's IP on hotspot (e.g., "192.168.43.102")
 
 # Option 2: Ethernet (direct cable) - uncomment these if using Ethernet
 # SENSOR_PI_IP = "192.168.50.2"   # Sensor Pi static IP (eth0)
@@ -62,10 +62,10 @@ MAX_RETRIES = 3                 # Max retries for failed operations
 # =============================================================================
 
 # Where Main Pi saves received CSV files
-CSV_SAVE_DIR = "/home/pi/launch_data"
+CSV_SAVE_DIR = "/home/elumbis/main_data"
 
 # Where Sensor Pi reads/generates CSV files (your capture pipeline output)
-CSV_SOURCE_DIR = "/home/pi/sensor_data"
+CSV_SOURCE_DIR = "/home/jkopila1/project/sensor_data"
 
 # =============================================================================
 # CLUB PRESETS
