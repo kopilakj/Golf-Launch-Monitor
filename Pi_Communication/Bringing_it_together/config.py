@@ -68,7 +68,7 @@ MAX_RETRIES = 3                 # Max retries for failed operations
 # =============================================================================
 
 # Where Main Pi saves received CSV files
-CSV_SAVE_DIR = "/home/elumbis/main_data"
+CSV_SAVE_DIR = "/home/elumbis/project/main_data"
 
 # Where Sensor Pi reads/generates CSV files (your capture pipeline output)
 CSV_SOURCE_DIR = "/home/jkopila1/project/sensor_data"
