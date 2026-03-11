@@ -269,6 +269,55 @@ def api_bridge_status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+## API endpoint to enable motion detection
+@app.route("/api/motion/enable", methods=["POST"])
+def api_motion_enable():
+    """Enable automatic swing detection via motion sensor."""
+    try:
+        response = requests.post(f"{BRIDGE_URL}/motion/enable", timeout=5)
+        return jsonify(response.json())
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "success": False,
+            "error": "Bridge not running. Start sensor_bridge.py!"
+        }), 503
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+## API endpoint to disable motion detection
+@app.route("/api/motion/disable", methods=["POST"])
+def api_motion_disable():
+    """Disable automatic swing detection."""
+    try:
+        response = requests.post(f"{BRIDGE_URL}/motion/disable", timeout=5)
+        return jsonify(response.json())
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "success": False,
+            "error": "Bridge not running. Start sensor_bridge.py!"
+        }), 503
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+## API endpoint to get motion detection status
+@app.route("/api/motion/status", methods=["GET"])
+def api_motion_status():
+    """Get current motion detection status."""
+    try:
+        response = requests.get(f"{BRIDGE_URL}/motion/status", timeout=5)
+        return jsonify(response.json())
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "motion_enabled": False,
+            "camera_available": False,
+            "error": "Bridge not running"
+        }), 503
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 ## Display Metrics
 @app.route("/display_metrics")
 def display_metrics():

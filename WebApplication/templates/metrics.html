@@ -113,6 +113,85 @@
             background-color: #666;
         }
 
+        /* Motion Detection Toggle Styles */
+        .motion-container {
+            margin: 30px auto;
+            padding: 20px;
+            background-color: #404040;
+            border-radius: 12px;
+            max-width: 400px;
+        }
+
+        .motion-title {
+            font-size: 16px;
+            color: #aaa;
+            margin-bottom: 15px;
+        }
+
+        .motion-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+
+        .motion-toggle-btn {
+            padding: 12px 30px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .motion-toggle-btn.enable {
+            background-color: #7ED957;
+            color: #333;
+        }
+
+        .motion-toggle-btn.enable:hover {
+            background-color: #6bc948;
+        }
+
+        .motion-toggle-btn.disable {
+            background-color: #e74c3c;
+            color: white;
+        }
+
+        .motion-toggle-btn.disable:hover {
+            background-color: #c0392b;
+        }
+
+        .motion-toggle-btn:disabled {
+            background-color: #666;
+            cursor: not-allowed;
+        }
+
+        .motion-status {
+            font-size: 18px;
+            font-weight: bold;
+            padding: 8px 16px;
+            border-radius: 20px;
+            display: inline-block;
+        }
+
+        .motion-status.enabled {
+            background-color: #7ED957;
+            color: #333;
+        }
+
+        .motion-status.disabled {
+            background-color: #666;
+            color: #ccc;
+        }
+
+        .motion-hint {
+            font-size: 12px;
+            color: #888;
+            margin-top: 10px;
+        }
+
     </style>
 </head>
 <body>
@@ -135,12 +214,24 @@
 
     </div>
 
-    <!-- Trigger Shot Button for Testing -->
+    <!-- Motion Detection Toggle -->
+    <div class="motion-container">
+        <div class="motion-title">AUTOMATIC SWING DETECTION</div>
+        <div class="motion-toggle">
+            <span class="motion-status disabled" id="motionStatus">OFF</span>
+            <button class="motion-toggle-btn enable" id="motionToggleBtn" onclick="toggleMotion()">
+                ENABLE
+            </button>
+        </div>
+        <p class="motion-hint" id="motionHint">Enable to automatically capture when you swing</p>
+    </div>
+
+    <!-- Manual Trigger Shot Button -->
     <div class="button-container">
         <button class="trigger-btn" id="triggerBtn" onclick="triggerShot()">
-            TRIGGER SHOT
+            MANUAL TRIGGER
         </button>
-        <p class="status-text" id="statusText">Click to capture a new shot</p>
+        <p class="status-text" id="statusText">Or click to manually capture a shot</p>
     </div>
 
     <div class="button-container">
@@ -184,9 +275,84 @@
             });
         }
 
-        // Auto-refresh every 5 seconds to catch new shots
-        // (Comment out if you prefer manual refresh only)
-        // setInterval(() => location.reload(), 5000);
+        // =============================================
+        // MOTION DETECTION CONTROLS
+        // =============================================
+        
+        let motionEnabled = false;
+        
+        function updateMotionUI(enabled) {
+            const status = document.getElementById('motionStatus');
+            const btn = document.getElementById('motionToggleBtn');
+            const hint = document.getElementById('motionHint');
+            
+            motionEnabled = enabled;
+            
+            if (enabled) {
+                status.textContent = 'ON';
+                status.className = 'motion-status enabled';
+                btn.textContent = 'DISABLE';
+                btn.className = 'motion-toggle-btn disable';
+                hint.textContent = 'Watching for swings... Page will refresh when shot captured';
+            } else {
+                status.textContent = 'OFF';
+                status.className = 'motion-status disabled';
+                btn.textContent = 'ENABLE';
+                btn.className = 'motion-toggle-btn enable';
+                hint.textContent = 'Enable to automatically capture when you swing';
+            }
+        }
+        
+        function toggleMotion() {
+            const btn = document.getElementById('motionToggleBtn');
+            btn.disabled = true;
+            
+            const endpoint = motionEnabled ? '/api/motion/disable' : '/api/motion/enable';
+            
+            fetch(endpoint, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(response => response.json())
+            .then(data => {
+                btn.disabled = false;
+                if (data.motion_enabled !== undefined) {
+                    updateMotionUI(data.motion_enabled);
+                } else if (data.success) {
+                    updateMotionUI(!motionEnabled);
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                btn.disabled = false;
+                alert('Error: ' + err.message);
+            });
+        }
+        
+        function checkMotionStatus() {
+            fetch('/api/motion/status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.motion_enabled !== undefined) {
+                    updateMotionUI(data.motion_enabled);
+                }
+            })
+            .catch(err => {
+                console.log('Could not check motion status:', err);
+            });
+        }
+        
+        // Check motion status on page load
+        checkMotionStatus();
+        
+        // Auto-refresh every 3 seconds when motion detection is enabled
+        // This will catch new shots automatically
+        setInterval(() => {
+            if (motionEnabled) {
+                location.reload();
+            }
+        }, 3000);
     </script>
 
 </body>

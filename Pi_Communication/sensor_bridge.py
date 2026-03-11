@@ -7,20 +7,26 @@ This runs on the MAIN PI alongside your partner's app.py.
 It acts as the bridge between:
   - The Web GUI (app.py on port 5000)
   - The Sensor Pi (sensor_server.py on port 5002)
+  - The motion detection camera (automatic swing triggers)
 
 What it does:
 1. Receives club selection from GUI via /set_club endpoint
 2. Sends CLUB_PRESET to Sensor Pi
-3. Receives shot trigger from GUI via /trigger endpoint  
-4. Sends TRIGGER to Sensor Pi, receives CSV data
-5. Parses metrics and POSTs them to app.py:/api/upload_metrics
-6. GUI displays the metrics
+3. Monitors camera for swing motion (background thread)
+4. When motion detected OR /trigger called: sends TRIGGER to Sensor Pi
+5. Receives CSV data from Sensor Pi
+6. Parses metrics and POSTs them to app.py:/api/upload_metrics
+7. GUI displays the metrics
 
 Run this with: python3 sensor_bridge.py
 
-This replaces the old:
-  - pi_server.py (club selection)
-  - send_metrics.py (metrics forwarding)
+Endpoints:
+  POST /set_club          - Set club (from GUI)
+  POST /trigger           - Manual trigger shot capture
+  POST /motion/enable     - Enable automatic motion detection
+  POST /motion/disable    - Disable motion detection
+  GET  /motion/status     - Get motion detection status
+  GET  /status            - Get detailed system status
 """
 
 import os
@@ -30,7 +36,7 @@ import time
 import socket
 import requests
 import traceback
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from typing import Optional, Dict, Any, Tuple
 from io import StringIO
 import csv
@@ -44,6 +50,17 @@ except ImportError:
     print("Run: pip install flask flask-cors requests")
     sys.exit(1)
 
+# Motion detection imports (Main Pi has camera)
+try:
+    import cv2
+    import numpy as np
+    from picamera2 import Picamera2
+    CAMERA_AVAILABLE = True
+except ImportError:
+    CAMERA_AVAILABLE = False
+    print("[Bridge] Warning: Camera libraries not available (cv2/picamera2)")
+    print("[Bridge] Motion detection will be disabled")
+
 # Import our protocol modules
 from config import (
     SENSOR_PI_IP, PI_COMM_PORT, BRIDGE_PORT,
@@ -51,7 +68,12 @@ from config import (
     CSV_SAVE_DIR, SOCKET_TIMEOUT, MAX_RETRIES, RECONNECT_DELAY,
     CLUB_PRESETS, DEFAULT_CLUB,
     normalize_club_name, PRESET_TO_GUI,
-    validate_config
+    validate_config,
+    # Motion detection settings
+    MOTION_CAMERA_SIZE, MOTION_TARGET_FPS, MOTION_EXPOSURE_US,
+    MOTION_ANALOGUE_GAIN, MOTION_BUFFER_COUNT,
+    MOTION_ROI, MOTION_PIXEL_DIFF_THRESH, MOTION_CHANGED_PIXELS_THRESH,
+    MOTION_MIN_CONSECUTIVE, MOTION_WARMUP_SEC,
 )
 from protocol import (
     send_frame, recv_frame, validate_header, validate_shot_header,
@@ -84,6 +106,10 @@ class BridgeState:
         self.shots_received: int = 0
         self.last_error: str = ""
         self.last_metrics: Dict[str, Any] = {}
+        
+        # Motion detection state
+        self.motion_enabled: bool = False
+        self.motion_detecting: bool = False
     
     def set_club(self, gui_name: str, preset_name: str, version: int):
         with self.lock:
@@ -111,6 +137,260 @@ class BridgeState:
 
 
 state = BridgeState()
+
+
+# =============================================================================
+# MOTION DETECTION (Background Thread)
+# =============================================================================
+
+class MotionDetector:
+    """
+    Detects motion in camera frames using ROI-based frame differencing.
+    Runs in a background thread and triggers shots when motion is detected.
+    """
+    
+    def __init__(self):
+        self.camera = None
+        self.running = False
+        self.enabled = Event()  # Thread-safe enable/disable
+        self.stop_event = Event()
+        self.thread: Optional[Thread] = None
+        
+        # Detection state
+        self.prev_roi_frame = None
+        self.consecutive_motion: int = 0
+        self.warmup_start: float = 0
+        self.is_warmed_up: bool = False
+        
+        # Cooldown to prevent double-triggers
+        self.last_trigger_time: float = 0
+        self.trigger_cooldown_sec: float = 2.0
+        
+        # Trigger lock to prevent concurrent triggers
+        self.trigger_lock = Lock()
+    
+    def setup_camera(self) -> bool:
+        """Initialize the camera for motion detection."""
+        if not CAMERA_AVAILABLE:
+            print("[Motion] Camera libraries not available")
+            return False
+        
+        try:
+            print("[Motion] Setting up camera...")
+            self.camera = Picamera2()
+            
+            config = self.camera.create_video_configuration(
+                raw={"size": MOTION_CAMERA_SIZE, "format": "R8"},
+                buffer_count=MOTION_BUFFER_COUNT,
+            )
+            self.camera.configure(config)
+            self.camera.start()
+            time.sleep(0.5)  # Let camera stabilize
+            
+            # Set camera controls
+            frame_us = int(1_000_000 / MOTION_TARGET_FPS)
+            self.camera.set_controls({
+                "FrameDurationLimits": (frame_us, frame_us),
+                "ExposureTime": MOTION_EXPOSURE_US,
+                "AnalogueGain": MOTION_ANALOGUE_GAIN,
+            })
+            
+            print(f"[Motion] Camera ready: {MOTION_CAMERA_SIZE} @ {MOTION_TARGET_FPS}fps")
+            print(f"[Motion] ROI: {MOTION_ROI}")
+            return True
+            
+        except Exception as e:
+            print(f"[Motion] Camera setup failed: {e}")
+            traceback.print_exc()
+            return False
+    
+    def cleanup_camera(self):
+        """Stop and close the camera."""
+        if self.camera:
+            try:
+                self.camera.close()
+            except:
+                pass
+            self.camera = None
+    
+    def reset_detection(self):
+        """Reset detection state for next shot."""
+        self.prev_roi_frame = None
+        self.consecutive_motion = 0
+        self.warmup_start = time.time()
+        self.is_warmed_up = False
+    
+    def check_frame(self, frame) -> Tuple[bool, int]:
+        """
+        Check a frame for motion.
+        
+        Returns:
+            Tuple of (triggered: bool, changed_pixels: int)
+        """
+        rx, ry, rw, rh = MOTION_ROI
+        roi_frame = frame[ry:ry+rh, rx:rx+rw]
+        
+        # Warmup period
+        if not self.is_warmed_up:
+            if time.time() - self.warmup_start < MOTION_WARMUP_SEC:
+                self.prev_roi_frame = roi_frame.copy()
+                return False, 0
+            else:
+                self.is_warmed_up = True
+                print("[Motion] Warmup complete, detecting motion...")
+        
+        # Need previous frame to compare
+        if self.prev_roi_frame is None:
+            self.prev_roi_frame = roi_frame.copy()
+            return False, 0
+        
+        # Calculate frame difference
+        diff = cv2.absdiff(roi_frame, self.prev_roi_frame)
+        _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
+        changed_pixels = int(np.count_nonzero(diff_bin))
+        
+        # Check if enough pixels changed
+        if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
+            self.consecutive_motion += 1
+        else:
+            self.consecutive_motion = 0
+        
+        # Store current frame for next comparison
+        self.prev_roi_frame = roi_frame.copy()
+        
+        # Trigger if enough consecutive frames with motion
+        triggered = self.consecutive_motion >= MOTION_MIN_CONSECUTIVE
+        
+        return triggered, changed_pixels
+    
+    def on_motion_detected(self, changed_pixels: int):
+        """Called when motion is detected - triggers shot capture."""
+        # Check cooldown
+        now = time.time()
+        if now - self.last_trigger_time < self.trigger_cooldown_sec:
+            print(f"[Motion] Cooldown active, ignoring trigger")
+            return
+        
+        # Use lock to prevent concurrent triggers
+        if not self.trigger_lock.acquire(blocking=False):
+            print(f"[Motion] Trigger already in progress, ignoring")
+            return
+        
+        try:
+            self.last_trigger_time = now
+            
+            print(f"[Motion] ========================================")
+            print(f"[Motion] SWING DETECTED! (changed={changed_pixels})")
+            print(f"[Motion] Triggering shot...")
+            print(f"[Motion] ========================================")
+            
+            # Trigger shot (uses the existing trigger_shot function)
+            result = trigger_shot()
+            
+            if result.get("success"):
+                print(f"[Motion] Shot captured successfully!")
+                print(f"[Motion] Shot ID: {result.get('shot_id')}")
+            else:
+                print(f"[Motion] Shot capture failed: {result.get('error')}")
+        
+        finally:
+            self.trigger_lock.release()
+            # Reset detection after trigger
+            self.reset_detection()
+    
+    def detection_loop(self):
+        """Main detection loop - runs in background thread."""
+        print("[Motion] Detection thread started")
+        
+        while not self.stop_event.is_set():
+            # Wait until enabled
+            if not self.enabled.is_set():
+                time.sleep(0.1)
+                continue
+            
+            # Make sure camera is set up
+            if self.camera is None:
+                if not self.setup_camera():
+                    print("[Motion] Camera setup failed, disabling motion detection")
+                    self.enabled.clear()
+                    state.motion_enabled = False
+                    continue
+                self.reset_detection()
+            
+            try:
+                # Capture and check frame
+                req = self.camera.capture_request()
+                raw = req.make_array("raw")
+                req.release()
+                
+                triggered, changed = self.check_frame(raw)
+                
+                if triggered:
+                    self.on_motion_detected(changed)
+                    
+            except Exception as e:
+                print(f"[Motion] Error in detection loop: {e}")
+                time.sleep(0.1)
+        
+        # Cleanup on exit
+        self.cleanup_camera()
+        print("[Motion] Detection thread stopped")
+    
+    def start(self) -> bool:
+        """Start the motion detection background thread."""
+        if not CAMERA_AVAILABLE:
+            print("[Motion] Cannot start - camera libraries not available")
+            return False
+        
+        if self.thread and self.thread.is_alive():
+            print("[Motion] Already running")
+            return True
+        
+        self.stop_event.clear()
+        self.thread = Thread(target=self.detection_loop, daemon=True)
+        self.thread.start()
+        self.running = True
+        print("[Motion] Background thread started")
+        return True
+    
+    def stop(self):
+        """Stop the motion detection thread."""
+        self.stop_event.set()
+        self.enabled.clear()
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        self.running = False
+        print("[Motion] Stopped")
+    
+    def enable(self) -> bool:
+        """Enable motion detection."""
+        if not CAMERA_AVAILABLE:
+            print("[Motion] Cannot enable - camera libraries not available")
+            return False
+        
+        if not self.running:
+            self.start()
+        
+        self.enabled.set()
+        state.motion_enabled = True
+        state.motion_detecting = True
+        print("[Motion] Enabled - watching for swings")
+        return True
+    
+    def disable(self):
+        """Disable motion detection (keeps thread running but not detecting)."""
+        self.enabled.clear()
+        state.motion_enabled = False
+        state.motion_detecting = False
+        print("[Motion] Disabled")
+    
+    def is_enabled(self) -> bool:
+        """Check if motion detection is enabled."""
+        return self.enabled.is_set()
+
+
+# Global motion detector instance
+motion_detector = MotionDetector()
 
 
 # =============================================================================
@@ -559,7 +839,11 @@ def get_status():
         "preset_confirmed": state.preset_confirmed,
         "shots_triggered": state.shots_triggered,
         "shots_received": state.shots_received,
-        "last_error": state.last_error
+        "last_error": state.last_error,
+        # Motion detection status
+        "camera_available": CAMERA_AVAILABLE,
+        "motion_enabled": motion_detector.is_enabled() if CAMERA_AVAILABLE else False,
+        "motion_thread_running": motion_detector.running if CAMERA_AVAILABLE else False
     })
 
 
@@ -658,6 +942,50 @@ def last_metrics():
 
 
 # =============================================================================
+# MOTION DETECTION ENDPOINTS
+# =============================================================================
+
+@app.route("/motion/enable", methods=["POST"])
+def motion_enable():
+    """Enable automatic motion detection for swing triggers."""
+    if not CAMERA_AVAILABLE:
+        return jsonify({
+            "success": False,
+            "error": "Camera not available on this system"
+        }), 503
+    
+    success = motion_detector.enable()
+    return jsonify({
+        "success": success,
+        "motion_enabled": motion_detector.is_enabled(),
+        "message": "Motion detection enabled - watching for swings" if success else "Failed to enable"
+    })
+
+
+@app.route("/motion/disable", methods=["POST"])
+def motion_disable():
+    """Disable automatic motion detection."""
+    motion_detector.disable()
+    return jsonify({
+        "success": True,
+        "motion_enabled": False,
+        "message": "Motion detection disabled"
+    })
+
+
+@app.route("/motion/status", methods=["GET"])
+def motion_status():
+    """Get motion detection status."""
+    return jsonify({
+        "camera_available": CAMERA_AVAILABLE,
+        "motion_enabled": motion_detector.is_enabled(),
+        "thread_running": motion_detector.running,
+        "shots_triggered": state.shots_triggered,
+        "shots_received": state.shots_received
+    })
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -674,11 +1002,18 @@ def main():
     print(f"Webapp metrics: {WEBAPP_METRICS_URL}")
     print()
     print("Endpoints:")
-    print(f"  POST /set_club  - Set club (from GUI)")
-    print(f"  GET  /get_club  - Get current club")
-    print(f"  POST /trigger   - Trigger shot capture")
-    print(f"  GET  /ping      - Check Sensor Pi connection")
-    print(f"  GET  /status    - Get detailed status")
+    print(f"  POST /set_club       - Set club (from GUI)")
+    print(f"  GET  /get_club       - Get current club")
+    print(f"  POST /trigger        - Manual trigger shot capture")
+    print(f"  GET  /ping           - Check Sensor Pi connection")
+    print(f"  GET  /status         - Get detailed status")
+    print()
+    print("Motion Detection:")
+    print(f"  POST /motion/enable  - Enable swing detection")
+    print(f"  POST /motion/disable - Disable swing detection")
+    print(f"  GET  /motion/status  - Get motion detection status")
+    print()
+    print(f"Camera available: {CAMERA_AVAILABLE}")
     print()
     print("=" * 60)
     print()
@@ -699,6 +1034,16 @@ def main():
         print("Could not connect to Sensor Pi.")
         print("Make sure sensor_server.py is running on Sensor Pi!")
         print("Bridge will retry when requests come in.")
+    print()
+    
+    # Start motion detection thread (but don't enable yet)
+    if CAMERA_AVAILABLE:
+        print("Starting motion detection thread...")
+        motion_detector.start()
+        print("Motion detection ready (disabled by default)")
+        print("Call POST /motion/enable to start detecting swings")
+    else:
+        print("Motion detection not available (camera libraries missing)")
     print()
     
     # Start Flask
