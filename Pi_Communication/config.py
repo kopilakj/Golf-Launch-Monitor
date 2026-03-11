@@ -73,6 +73,41 @@ CSV_SAVE_DIR = "/home/elumbis/project/main_data"
 # Where Sensor Pi reads/generates CSV files (your capture pipeline output)
 CSV_SOURCE_DIR = "/home/jkopila1/project/sensor_data"
 
+# Where Sensor Pi saves captured frames
+CAPTURE_OUTPUT_DIR = "/home/jkopila1/project/captures"
+
+# =============================================================================
+# CAPTURE SETTINGS (Sensor Pi - rpicam-vid)
+# =============================================================================
+
+# Default capture settings for rpicam-vid
+CAPTURE_WIDTH = 640
+CAPTURE_HEIGHT = 400
+CAPTURE_FPS = 300
+CAPTURE_DURATION_MS = 500  # Default capture duration in milliseconds
+
+# =============================================================================
+# MOTION DETECTION SETTINGS (Main Pi - swing detection)
+# =============================================================================
+
+# Camera settings for motion detection
+MOTION_CAMERA_SIZE = (640, 400)
+MOTION_TARGET_FPS = 300
+MOTION_EXPOSURE_US = 994
+MOTION_ANALOGUE_GAIN = 4.0
+MOTION_BUFFER_COUNT = 4
+
+# Region of Interest for motion detection (x, y, width, height)
+MOTION_ROI = (210, 250, 160, 50)
+
+# Motion detection thresholds
+MOTION_PIXEL_DIFF_THRESH = 10      # Pixel intensity difference to count as changed
+MOTION_CHANGED_PIXELS_THRESH = 500  # Number of changed pixels to trigger
+MOTION_MIN_CONSECUTIVE = 2          # Consecutive frames with motion to trigger
+
+# Timing
+MOTION_WARMUP_SEC = 1.0  # Seconds to wait before detecting motion
+
 # =============================================================================
 # CLUB NAME MAPPING (GUI names -> internal preset names)
 # =============================================================================

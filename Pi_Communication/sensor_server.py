@@ -6,7 +6,7 @@ Sensor Pi Server
 This runs on the SENSOR PI (the one with cameras/sensors).
 It listens for connections from Main Pi and:
 1. Receives CLUB_PRESET messages -> applies camera settings
-2. Receives TRIGGER messages -> captures shot data
+2. Receives TRIGGER messages -> captures shot data using rpicam-vid
 3. Sends CSV data back to Main Pi
 
 Run this with: python3 sensor_server.py
@@ -18,12 +18,20 @@ import math
 import socket
 import traceback
 import time
+import subprocess
+from pathlib import Path
+from datetime import datetime
 from typing import Optional, Dict, Any
+
+import numpy as np
+import cv2
 
 # Import our modules
 from config import (
     SENSOR_PI_IP, PI_COMM_PORT, CHUNK_SIZE,
     CSV_SOURCE_DIR, CLUB_PRESETS, DEFAULT_CLUB,
+    CAPTURE_OUTPUT_DIR, CAPTURE_WIDTH, CAPTURE_HEIGHT,
+    CAPTURE_FPS, CAPTURE_DURATION_MS,
     validate_config
 )
 from protocol import (
@@ -50,52 +58,130 @@ class SensorState:
         self.current_preset_version: int = 0
         self.current_preset_data: Dict[str, Any] = {}
         self.shots_processed: int = 0
+        
+        # Capture settings (can be overridden by preset)
+        self.capture_width: int = CAPTURE_WIDTH
+        self.capture_height: int = CAPTURE_HEIGHT
+        self.capture_fps: int = CAPTURE_FPS
+        self.capture_duration_ms: int = CAPTURE_DURATION_MS
     
     def apply_preset(self, club_id: str, preset_data: Dict[str, Any], version: int):
-        """Apply a club preset (configure cameras/sensors)."""
+        """Apply a club preset (configure camera settings)."""
         self.current_club_id = club_id
         self.current_preset_version = version
         self.current_preset_data = preset_data
         
-        # TODO: Replace with your actual camera/sensor configuration
-        # Example: set exposure, threshold, etc.
+        # Apply capture settings from preset if available
+        self.capture_duration_ms = preset_data.get('capture_duration_ms', CAPTURE_DURATION_MS)
+        
         print(f"[Sensor] Applying preset for {club_id}:")
         print(f"         Version: {version}")
-        print(f"         Settings: {preset_data}")
+        print(f"         Capture duration: {self.capture_duration_ms}ms")
+        print(f"         Resolution: {self.capture_width}x{self.capture_height} @ {self.capture_fps}fps")
+    
+    def run_capture(self, shot_id: str) -> Path:
+        """
+        Run rpicam-vid to capture high-speed video.
         
-        # Your camera setup code would go here, e.g.:
-        # camera.exposure = preset_data.get('exposure', 100)
-        # threshold = preset_data.get('threshold', 0.7)
+        Returns:
+            Path to the output directory containing captured frames
+        """
+        # Create output directory for this shot
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(CAPTURE_OUTPUT_DIR) / f"{shot_id}_{timestamp}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        pts_path = out_dir / "capture.pts"
+        yuv_path = out_dir / "capture.yuv"
+        
+        # Build rpicam-vid command
+        cmd = [
+            "rpicam-vid",
+            "--width", str(self.capture_width),
+            "--height", str(self.capture_height),
+            "--framerate", str(self.capture_fps),
+            "--codec", "yuv420",
+            "--denoise", "off",
+            "--nopreview",
+            "--save-pts", str(pts_path),
+            "-t", str(self.capture_duration_ms),
+            "-o", str(yuv_path),
+        ]
+        
+        print(f"[Sensor] Running capture: {' '.join(cmd)}")
+        
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"[Sensor] Capture complete: {yuv_path}")
+        except subprocess.CalledProcessError as e:
+            print(f"[Sensor] Capture failed: {e.stderr}")
+            raise RuntimeError(f"rpicam-vid failed: {e.stderr}")
+        
+        return out_dir
+    
+    def extract_frames(self, out_dir: Path) -> int:
+        """
+        Extract Y-channel frames from YUV420 capture.
+        
+        Returns:
+            Number of frames extracted
+        """
+        frame_bytes = self.capture_width * self.capture_height * 3 // 2  # YUV420
+        yuv_path = out_dir / "capture.yuv"
+        
+        if not yuv_path.exists():
+            print(f"[Sensor] YUV file not found: {yuv_path}")
+            return 0
+        
+        data = yuv_path.read_bytes()
+        num_frames = len(data) // frame_bytes
+        
+        print(f"[Sensor] Extracting {num_frames} frames from {yuv_path}")
+        
+        for i in range(num_frames):
+            start = i * frame_bytes
+            y_plane = np.frombuffer(
+                data[start:start + self.capture_width * self.capture_height],
+                dtype=np.uint8
+            ).reshape(self.capture_height, self.capture_width)
+            
+            frame_path = out_dir / f"frame_{i:04d}.png"
+            cv2.imwrite(str(frame_path), y_plane)
+        
+        print(f"[Sensor] Extracted {num_frames} frames to {out_dir}")
+        return num_frames
     
     def capture_shot(self, shot_id: str, club_id: str) -> bytes:
         """
-        Capture and process a shot.
+        Capture and process a shot using rpicam-vid.
         
-        TODO: Replace this with your actual capture pipeline!
-        
-        This should:
-        1. Trigger cameras to capture
-        2. Process images to calculate metrics
-        3. Generate CSV with results
-        4. Return CSV as bytes
+        This:
+        1. Runs rpicam-vid to capture high-speed video
+        2. Extracts frames from YUV data
+        3. Returns placeholder metrics as CSV (real processing TBD)
         """
         self.shots_processed += 1
         
         print(f"[Sensor] Capturing shot {shot_id} with {club_id}")
         print(f"         Using preset version {self.current_preset_version}")
         
-        # =====================================================================
-        # TODO: Replace this dummy data with your actual capture pipeline!
-        # =====================================================================
+        # Run the capture
+        try:
+            out_dir = self.run_capture(shot_id)
+            num_frames = self.extract_frames(out_dir)
+        except Exception as e:
+            print(f"[Sensor] Capture error: {e}")
+            # Return error metrics
+            csv_lines = [
+                "metric,value,unit",
+                f"error,{str(e)},",
+                f"club_id,{club_id},",
+                f"shot_id,{shot_id},",
+            ]
+            return ("\n".join(csv_lines) + "\n").encode("utf-8")
         
-        # This is just example/dummy data for testing
-        # Your actual code should:
-        # 1. Trigger the cameras
-        # 2. Capture images
-        # 3. Run your ball tracking algorithm
-        # 4. Calculate ball_speed, launch_angle, spin_rate, etc.
-        # 5. Format as CSV
-        
+        # Generate placeholder metrics
+        # TODO: Replace with actual ball tracking / analysis
         csv_lines = [
             "metric,value,unit",
             "ball_speed,152.3,mph",
@@ -104,15 +190,21 @@ class SensorState:
             "spin_axis,3.2,degrees",
             "carry_distance,245,yards",
             "total_distance,267,yards",
+            f"frames_captured,{num_frames},",
+            f"capture_fps,{self.capture_fps},",
+            f"capture_duration_ms,{self.capture_duration_ms},",
             f"club_id,{club_id},",
             f"shot_id,{shot_id},",
             f"preset_version,{self.current_preset_version},",
+            f"output_dir,{out_dir},",
         ]
         
         csv_text = "\n".join(csv_lines) + "\n"
         
-        # Simulate some processing time
-        time.sleep(0.5)  # Remove this in production!
+        # Also save CSV to the capture directory
+        csv_path = out_dir / "metrics.csv"
+        csv_path.write_text(csv_text)
+        print(f"[Sensor] Metrics saved to {csv_path}")
         
         return csv_text.encode("utf-8")
 
