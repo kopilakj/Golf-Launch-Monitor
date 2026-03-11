@@ -71,10 +71,10 @@ MAX_RETRIES = 3                 # Max retries for failed operations
 CSV_SAVE_DIR = "/home/elumbis/project/main_data"
 
 # Where Sensor Pi reads/generates CSV files (your capture pipeline output)
-CSV_SOURCE_DIR = "/home/jkopila1/project/sensor_data"
+CSV_SOURCE_DIR = "/home/jkopila1/project/Golf-Launch-Monitor/Captures/sensor_data"
 
 # Where Sensor Pi saves captured frames
-CAPTURE_OUTPUT_DIR = "/home/jkopila1/project/captures"
+CAPTURE_OUTPUT_DIR = "/home/jkopila1/project/Golf-Launch-Monitor/Captures/camera_captures"
 
 # =============================================================================
 # CAPTURE SETTINGS (Sensor Pi - rpicam-vid)
