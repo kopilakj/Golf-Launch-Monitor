@@ -5,8 +5,8 @@
     <style>
         body {
             font-family: Arial, sans-serif;
-            background-color: #d9d9d9;
-            color: black;
+            background-color: #1a1a2e;
+            color: white;
             text-align: center;
             margin: 0;
             padding: 40px;
@@ -15,6 +15,7 @@
         h1 {
             font-size: 48px;
             margin-bottom: 10px;
+            color: white;
         }
 
         h2 {
@@ -32,164 +33,133 @@
         }
 
         .metric-card {
-            background-color: #505050;
+            background-color: #16213e;
             padding: 25px;
             border-radius: 12px;
             box-shadow: 0px 4px 10px rgba(0,0,0,0.4);
+            border: 1px solid #0f3460;
         }
 
         .metric-title {
-            font-size: 18px;
+            font-size: 16px;
             color: #7ED957;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
 
         .metric-value {
-            font-size: 36px;
+            font-size: 42px;
             font-weight: bold;
             color: white;
             margin-top: 10px;
         }
 
-        .back-btn {
-            margin-top: 50px;
-            padding: 12px 25px;
-            font-size: 16px;
-            font-weight: bold;
-            border: none;
-            border-radius: 8px;
-            background-color: #444;
-            color: #7ED957;
-            cursor: pointer;
-        }
-
-        .back-btn:hover {
-            background-color: #666;
-        }
-
-        .trigger-btn {
-            padding: 15px 40px;
-            font-size: 20px;
-            border: none;
-            border-radius: 12px;
-            background-color: #7ED957;
-            color: #333;
-            cursor: pointer;
-            font-weight: bold;
-            margin: 30px auto;
-            display: block;
-        }
-
-        .trigger-btn:hover {
-            background-color: #6bc948;
-        }
-
-        .trigger-btn:disabled {
-            background-color: #888;
-            cursor: not-allowed;
-        }
-
-        .status-text {
+        .metric-unit {
             font-size: 14px;
-            color: #666;
-            margin-top: 10px;
+            color: #888;
+            margin-top: 5px;
         }
 
         .button-container {
             margin-top: 40px;
         }
 
-        .change-club-btn {
+        .nav-btn {
             padding: 12px 25px;
             font-size: 16px;
             border: none;
             border-radius: 8px;
-            background-color: #505050;
+            background-color: #0f3460;
             color: #7ED957;
             cursor: pointer;
             margin: 10px;
+            transition: background-color 0.3s;
         }
 
-        .change-club-btn:hover {
-            background-color: #666;
+        .nav-btn:hover {
+            background-color: #1a4a7a;
         }
 
-        /* Motion Detection Toggle Styles */
+        /* Motion Detection Status */
         .motion-container {
             margin: 30px auto;
-            padding: 20px;
-            background-color: #404040;
+            padding: 25px;
+            background-color: #16213e;
             border-radius: 12px;
-            max-width: 400px;
+            max-width: 500px;
+            border: 1px solid #0f3460;
         }
 
         .motion-title {
-            font-size: 16px;
-            color: #aaa;
+            font-size: 14px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
             margin-bottom: 15px;
         }
 
-        .motion-toggle {
+        .motion-status-display {
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 15px;
+            gap: 20px;
+            margin-bottom: 15px;
         }
 
-        .motion-toggle-btn {
-            padding: 12px 30px;
-            font-size: 16px;
-            font-weight: bold;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s ease;
+        .motion-indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
         }
 
-        .motion-toggle-btn.enable {
+        .motion-indicator.active {
             background-color: #7ED957;
-            color: #333;
+            box-shadow: 0 0 20px #7ED957;
         }
 
-        .motion-toggle-btn.enable:hover {
-            background-color: #6bc948;
-        }
-
-        .motion-toggle-btn.disable {
-            background-color: #e74c3c;
-            color: white;
-        }
-
-        .motion-toggle-btn.disable:hover {
-            background-color: #c0392b;
-        }
-
-        .motion-toggle-btn:disabled {
+        .motion-indicator.inactive {
             background-color: #666;
-            cursor: not-allowed;
+            animation: none;
         }
 
-        .motion-status {
-            font-size: 18px;
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .motion-status-text {
+            font-size: 24px;
             font-weight: bold;
-            padding: 8px 16px;
-            border-radius: 20px;
-            display: inline-block;
         }
 
-        .motion-status.enabled {
-            background-color: #7ED957;
-            color: #333;
+        .motion-status-text.active {
+            color: #7ED957;
         }
 
-        .motion-status.disabled {
-            background-color: #666;
-            color: #ccc;
+        .motion-status-text.inactive {
+            color: #888;
         }
 
         .motion-hint {
-            font-size: 12px;
-            color: #888;
+            font-size: 14px;
+            color: #aaa;
             margin-top: 10px;
+        }
+
+        .waiting-message {
+            font-size: 18px;
+            color: #7ED957;
+            margin-top: 20px;
+            padding: 15px;
+            background-color: rgba(126, 217, 87, 0.1);
+            border-radius: 8px;
+            display: none;
+        }
+
+        .waiting-message.visible {
+            display: block;
         }
 
     </style>
@@ -199,134 +169,92 @@
     <h1>{{ player_name }}</h1>
     <h2>{{ club }}</h2>
 
-    <div class="metrics-container">
-
-        {% for key, value in metrics.items() %}
-        <div class="metric-card">
-            <div class="metric-title">
-                {{ key.replace('_', ' ').title() }}
-            </div>
-            <div class="metric-value">
-                {{ value }}
-            </div>
-        </div>
-        {% endfor %}
-
-    </div>
-
-    <!-- Motion Detection Toggle -->
+    <!-- Motion Detection Status -->
     <div class="motion-container">
-        <div class="motion-title">AUTOMATIC SWING DETECTION</div>
-        <div class="motion-toggle">
-            <span class="motion-status disabled" id="motionStatus">OFF</span>
-            <button class="motion-toggle-btn enable" id="motionToggleBtn" onclick="toggleMotion()">
-                ENABLE
-            </button>
+        <div class="motion-title">Swing Detection</div>
+        <div class="motion-status-display">
+            <div class="motion-indicator inactive" id="motionIndicator"></div>
+            <span class="motion-status-text inactive" id="motionStatusText">INACTIVE</span>
         </div>
-        <p class="motion-hint" id="motionHint">Enable to automatically capture when you swing</p>
+        <p class="motion-hint" id="motionHint">Swing detection will start automatically</p>
+        <div class="waiting-message" id="waitingMessage">
+            Ready to capture... Take your swing!
+        </div>
     </div>
 
-    <!-- Manual Trigger Shot Button -->
-    <div class="button-container">
-        <button class="trigger-btn" id="triggerBtn" onclick="triggerShot()">
-            MANUAL TRIGGER
-        </button>
-        <p class="status-text" id="statusText">Or click to manually capture a shot</p>
+    <div class="metrics-container">
+        {% for key, value in metrics.items() %}
+            {% if key not in ['club_id', 'shot_id', 'output_dir', 'frames_captured', 'error'] %}
+            <div class="metric-card">
+                <div class="metric-title">
+                    {{ key.replace('_', ' ').title() }}
+                </div>
+                <div class="metric-value">
+                    {{ value }}
+                </div>
+                <div class="metric-unit">
+                    {% if key == 'ball_speed' %}mph{% endif %}
+                    {% if key == 'launch_angle' %}degrees{% endif %}
+                    {% if key == 'apex_height' %}feet{% endif %}
+                    {% if key == 'carry_distance' %}yards{% endif %}
+                </div>
+            </div>
+            {% endif %}
+        {% endfor %}
     </div>
 
     <div class="button-container">
         <a href="{{ url_for('select_club') }}">
-            <button class="change-club-btn">Change Club</button>
+            <button class="nav-btn">Change Club</button>
         </a>
         <a href="{{ url_for('back_to_players') }}">
-            <button class="back-btn">Back to Players</button>
+            <button class="nav-btn">Back to Players</button>
         </a>
     </div>
 
     <script>
-        function triggerShot() {
-            const btn = document.getElementById('triggerBtn');
-            const status = document.getElementById('statusText');
-            
-            btn.disabled = true;
-            btn.textContent = 'CAPTURING...';
-            status.textContent = 'Waiting for Sensor Pi...';
-            
-            fetch('/api/trigger_shot', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'}
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    status.textContent = 'Shot captured! Refreshing...';
-                    // Reload page to show new metrics
-                    setTimeout(() => location.reload(), 500);
-                } else {
-                    status.textContent = 'Error: ' + (data.error || 'Unknown error');
-                    btn.disabled = false;
-                    btn.textContent = 'TRIGGER SHOT';
-                }
-            })
-            .catch(err => {
-                status.textContent = 'Error: ' + err.message;
-                btn.disabled = false;
-                btn.textContent = 'TRIGGER SHOT';
-            });
-        }
-
-        // =============================================
-        // MOTION DETECTION CONTROLS
-        // =============================================
-        
         let motionEnabled = false;
         
         function updateMotionUI(enabled) {
-            const status = document.getElementById('motionStatus');
-            const btn = document.getElementById('motionToggleBtn');
+            const indicator = document.getElementById('motionIndicator');
+            const statusText = document.getElementById('motionStatusText');
             const hint = document.getElementById('motionHint');
+            const waitingMsg = document.getElementById('waitingMessage');
             
             motionEnabled = enabled;
             
             if (enabled) {
-                status.textContent = 'ON';
-                status.className = 'motion-status enabled';
-                btn.textContent = 'DISABLE';
-                btn.className = 'motion-toggle-btn disable';
-                hint.textContent = 'Watching for swings... Page will refresh when shot captured';
+                indicator.className = 'motion-indicator active';
+                statusText.textContent = 'ACTIVE';
+                statusText.className = 'motion-status-text active';
+                hint.textContent = 'Monitoring for swing motion...';
+                waitingMsg.className = 'waiting-message visible';
             } else {
-                status.textContent = 'OFF';
-                status.className = 'motion-status disabled';
-                btn.textContent = 'ENABLE';
-                btn.className = 'motion-toggle-btn enable';
-                hint.textContent = 'Enable to automatically capture when you swing';
+                indicator.className = 'motion-indicator inactive';
+                statusText.textContent = 'INACTIVE';
+                statusText.className = 'motion-status-text inactive';
+                hint.textContent = 'Connecting to sensor system...';
+                waitingMsg.className = 'waiting-message';
             }
         }
         
-        function toggleMotion() {
-            const btn = document.getElementById('motionToggleBtn');
-            btn.disabled = true;
-            
-            const endpoint = motionEnabled ? '/api/motion/disable' : '/api/motion/enable';
-            
-            fetch(endpoint, {
+        function enableMotion() {
+            fetch('/api/motion/enable', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'}
             })
             .then(response => response.json())
             .then(data => {
-                btn.disabled = false;
                 if (data.motion_enabled !== undefined) {
                     updateMotionUI(data.motion_enabled);
                 } else if (data.success) {
-                    updateMotionUI(!motionEnabled);
-                } else {
-                    alert('Error: ' + (data.error || 'Unknown error'));
+                    updateMotionUI(true);
                 }
             })
             .catch(err => {
-                btn.disabled = false;
-                alert('Error: ' + err.message);
+                console.log('Could not enable motion:', err);
+                // Retry after a delay
+                setTimeout(enableMotion, 3000);
             });
         }
         
@@ -336,14 +264,20 @@
             .then(data => {
                 if (data.motion_enabled !== undefined) {
                     updateMotionUI(data.motion_enabled);
+                    // If not enabled, try to enable it
+                    if (!data.motion_enabled) {
+                        enableMotion();
+                    }
                 }
             })
             .catch(err => {
                 console.log('Could not check motion status:', err);
+                // Try to enable anyway
+                setTimeout(enableMotion, 2000);
             });
         }
         
-        // Check motion status on page load
+        // Auto-enable motion detection on page load
         checkMotionStatus();
         
         // Auto-refresh every 3 seconds when motion detection is enabled

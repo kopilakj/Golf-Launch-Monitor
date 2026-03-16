@@ -6,8 +6,10 @@ Sensor Pi Server
 This runs on the SENSOR PI (the one with cameras/sensors).
 It listens for connections from Main Pi and:
 1. Receives CLUB_PRESET messages -> applies camera settings
-2. Receives TRIGGER messages -> captures shot data using rpicam-vid
-3. Sends CSV data back to Main Pi
+2. Runs continuous circular buffer capture in background
+3. Receives TRIGGER messages -> saves pre/post trigger frames
+4. Runs ball detection and metric calculation
+5. Sends CSV data with real metrics back to Main Pi
 
 Run this with: python3 sensor_server.py
 """
@@ -18,13 +20,16 @@ import math
 import socket
 import traceback
 import time
-import subprocess
+import csv as csv_module
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any
+from threading import Thread, Lock, Event
+from collections import deque
+from typing import Optional, Dict, Any, List, Tuple
 
 import numpy as np
 import cv2
+from picamera2 import Picamera2
 
 # Import our modules
 from config import (
@@ -48,7 +53,557 @@ from messages import (
 
 
 # =============================================================================
-# GLOBAL STATE
+# CIRCULAR BUFFER CAPTURE SETTINGS
+# =============================================================================
+
+PRE_TRIGGER_FRAMES = 15      # Frames to save before trigger
+POST_TRIGGER_FRAMES = 20     # Frames to save after trigger
+BUFFER_SIZE = PRE_TRIGGER_FRAMES + 10  # Circular buffer size
+
+# Camera settings
+CAMERA_SIZE = (CAPTURE_WIDTH, CAPTURE_HEIGHT)
+TARGET_FPS = CAPTURE_FPS
+EXPOSURE_US = 994
+ANALOGUE_GAIN = 4.0
+BUFFER_COUNT = 4
+
+
+# =============================================================================
+# METRIC CALCULATION CONSTANTS (from metric_calculation.py)
+# =============================================================================
+
+# Camera calibration
+CAMERA_DISTANCE_M = 0.965          # Distance from camera to ball (meters)
+HORIZONTAL_FOV_DEG = 70.0          # Horizontal field of view (degrees)
+FRAME_RATE_FPS = CAPTURE_FPS       # Capture rate
+
+# Derived calibration values
+HORIZONTAL_FOV_RAD = np.radians(HORIZONTAL_FOV_DEG)
+FIELD_WIDTH_M = 2 * CAMERA_DISTANCE_M * np.tan(HORIZONTAL_FOV_RAD / 2)
+PIXELS_PER_METER = CAPTURE_WIDTH / FIELD_WIDTH_M
+METERS_PER_PIXEL = FIELD_WIDTH_M / CAPTURE_WIDTH
+SECONDS_PER_FRAME = 1.0 / FRAME_RATE_FPS
+
+# Physics constants
+GRAVITY_M_S2 = 9.81
+AIR_DENSITY_KG_M3 = 1.225
+BALL_MASS_KG = 0.04593
+BALL_RADIUS_M = 0.02135
+BALL_CROSS_SECTION_M2 = np.pi * BALL_RADIUS_M ** 2
+DRAG_COEFFICIENT = 0.25
+
+# Detection parameters
+BRIGHTNESS_THRESHOLD = 80
+MOTION_THRESHOLD = 25
+MIN_BALL_AREA_REST = 40
+MAX_BALL_AREA_REST = 300
+MIN_BALL_AREA_FLIGHT = 20
+MAX_BALL_AREA_FLIGHT = 500
+MIN_CIRCULARITY_REST = 0.4
+MIN_CIRCULARITY_FLIGHT = 0.15
+REST_SEARCH_RADIUS = 80
+
+# Known ball rest position (approximate)
+BALL_REST_X = 223
+BALL_REST_Y = 270
+
+
+# =============================================================================
+# CIRCULAR BUFFER CAPTURE SYSTEM
+# =============================================================================
+
+class CircularBufferCapture:
+    """
+    Continuously captures frames into a circular buffer.
+    When triggered, saves pre-trigger and post-trigger frames.
+    """
+    
+    def __init__(self):
+        self.camera: Optional[Picamera2] = None
+        self.running = False
+        self.stop_event = Event()
+        self.trigger_event = Event()
+        self.capture_thread: Optional[Thread] = None
+        
+        # Circular buffer for frames
+        self.frame_buffer: deque = deque(maxlen=BUFFER_SIZE)
+        self.meta_buffer: deque = deque(maxlen=BUFFER_SIZE)
+        self.buffer_lock = Lock()
+        
+        # Captured frames after trigger
+        self.captured_frames: List[np.ndarray] = []
+        self.captured_meta: List[Dict] = []
+        self.capture_complete = Event()
+        
+    def setup_camera(self) -> bool:
+        """Initialize the camera for continuous capture."""
+        try:
+            print("[Capture] Setting up camera...")
+            self.camera = Picamera2()
+            
+            config = self.camera.create_video_configuration(
+                raw={"size": CAMERA_SIZE, "format": "R8"},
+                buffer_count=BUFFER_COUNT,
+            )
+            self.camera.configure(config)
+            self.camera.start()
+            time.sleep(0.5)
+            
+            # Set camera controls
+            frame_us = int(1_000_000 / TARGET_FPS)
+            self.camera.set_controls({
+                "FrameDurationLimits": (frame_us, frame_us),
+                "ExposureTime": EXPOSURE_US,
+                "AnalogueGain": ANALOGUE_GAIN,
+            })
+            
+            print(f"[Capture] Camera ready: {CAMERA_SIZE} @ {TARGET_FPS}fps")
+            return True
+            
+        except Exception as e:
+            print(f"[Capture] Camera setup failed: {e}")
+            traceback.print_exc()
+            return False
+    
+    def cleanup_camera(self):
+        """Stop and close the camera."""
+        if self.camera:
+            try:
+                self.camera.close()
+            except:
+                pass
+            self.camera = None
+    
+    def capture_loop(self):
+        """Main capture loop - runs continuously in background thread."""
+        print("[Capture] Capture loop started")
+        
+        while not self.stop_event.is_set():
+            try:
+                # Capture frame
+                req = self.camera.capture_request()
+                meta = req.get_metadata()
+                raw = req.make_array("raw").copy()
+                req.release()
+                
+                timestamp_us = meta.get("SensorTimestamp", time.monotonic_ns() // 1000)
+                
+                # Add to circular buffer
+                with self.buffer_lock:
+                    self.frame_buffer.append(raw)
+                    self.meta_buffer.append({
+                        "timestamp_us": timestamp_us,
+                        "frame_time": time.time()
+                    })
+                
+                # Check if trigger was received
+                if self.trigger_event.is_set():
+                    self._handle_trigger()
+                    self.trigger_event.clear()
+                    
+            except Exception as e:
+                print(f"[Capture] Error in capture loop: {e}")
+                time.sleep(0.01)
+        
+        print("[Capture] Capture loop stopped")
+    
+    def _handle_trigger(self):
+        """Handle trigger - save pre-buffer and capture post-trigger frames."""
+        print(f"[Capture] Trigger received! Saving frames...")
+        
+        # Copy pre-trigger frames from buffer
+        with self.buffer_lock:
+            self.captured_frames = list(self.frame_buffer)
+            self.captured_meta = list(self.meta_buffer)
+        
+        pre_count = len(self.captured_frames)
+        print(f"[Capture] Saved {pre_count} pre-trigger frames")
+        
+        # Capture post-trigger frames
+        for i in range(POST_TRIGGER_FRAMES):
+            try:
+                req = self.camera.capture_request()
+                meta = req.get_metadata()
+                raw = req.make_array("raw").copy()
+                req.release()
+                
+                timestamp_us = meta.get("SensorTimestamp", time.monotonic_ns() // 1000)
+                
+                self.captured_frames.append(raw)
+                self.captured_meta.append({
+                    "timestamp_us": timestamp_us,
+                    "frame_time": time.time()
+                })
+            except Exception as e:
+                print(f"[Capture] Error capturing post-trigger frame {i}: {e}")
+                break
+        
+        post_count = len(self.captured_frames) - pre_count
+        print(f"[Capture] Captured {post_count} post-trigger frames")
+        print(f"[Capture] Total: {len(self.captured_frames)} frames")
+        
+        self.capture_complete.set()
+    
+    def start(self) -> bool:
+        """Start continuous capture."""
+        if self.running:
+            return True
+        
+        if not self.setup_camera():
+            return False
+        
+        self.stop_event.clear()
+        self.capture_thread = Thread(target=self.capture_loop, daemon=True)
+        self.capture_thread.start()
+        self.running = True
+        
+        print("[Capture] Continuous capture started")
+        return True
+    
+    def stop(self):
+        """Stop continuous capture."""
+        self.stop_event.set()
+        if self.capture_thread:
+            self.capture_thread.join(timeout=2.0)
+        self.cleanup_camera()
+        self.running = False
+        print("[Capture] Stopped")
+    
+    def trigger(self, timeout: float = 5.0) -> bool:
+        """
+        Trigger frame capture.
+        
+        Returns True if frames were captured successfully.
+        """
+        if not self.running:
+            print("[Capture] Not running, cannot trigger")
+            return False
+        
+        # Clear previous capture
+        self.captured_frames = []
+        self.captured_meta = []
+        self.capture_complete.clear()
+        
+        # Signal trigger
+        self.trigger_event.set()
+        
+        # Wait for capture to complete
+        if self.capture_complete.wait(timeout=timeout):
+            return len(self.captured_frames) > 0
+        else:
+            print("[Capture] Trigger timeout")
+            return False
+    
+    def get_captured_frames(self) -> Tuple[List[np.ndarray], List[Dict]]:
+        """Get the captured frames and metadata."""
+        return self.captured_frames, self.captured_meta
+
+
+# Global circular buffer capture instance
+capture_system = CircularBufferCapture()
+
+
+# =============================================================================
+# BALL DETECTION AND METRIC CALCULATION
+# =============================================================================
+
+def get_contour_features(contour, gray_frame=None) -> dict:
+    """Extract features from a contour."""
+    area = cv2.contourArea(contour)
+    perimeter = cv2.arcLength(contour, True)
+    
+    circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0
+    
+    M = cv2.moments(contour)
+    if M['m00'] > 0:
+        cx = int(M['m10'] / M['m00'])
+        cy = int(M['m01'] / M['m00'])
+    else:
+        cx, cy = 0, 0
+    
+    x, y, w, h = cv2.boundingRect(contour)
+    
+    brightness = 0
+    if gray_frame is not None:
+        mask = np.zeros(gray_frame.shape, dtype=np.uint8)
+        cv2.drawContours(mask, [contour], 0, 255, -1)
+        brightness = cv2.mean(gray_frame, mask=mask)[0]
+    
+    return {
+        'area': area,
+        'circularity': circularity,
+        'cx': cx,
+        'cy': cy,
+        'bbox': (x, y, w, h),
+        'brightness': brightness
+    }
+
+
+def detect_ball_at_rest(frame: np.ndarray) -> Optional[Tuple[int, int, float]]:
+    """
+    Detect ball at rest position.
+    Returns (x, y, area) or None if not found.
+    """
+    if len(frame.shape) == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = frame
+    
+    _, thresh = cv2.threshold(gray, BRIGHTNESS_THRESHOLD, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    best_candidate = None
+    best_score = -1
+    
+    for contour in contours:
+        features = get_contour_features(contour, gray)
+        
+        if not (MIN_BALL_AREA_REST < features['area'] < MAX_BALL_AREA_REST):
+            continue
+        if features['circularity'] < MIN_CIRCULARITY_REST:
+            continue
+        
+        dist = np.sqrt((features['cx'] - BALL_REST_X)**2 + (features['cy'] - BALL_REST_Y)**2)
+        if dist > REST_SEARCH_RADIUS:
+            continue
+        
+        score = 100 - dist + features['circularity'] * 50
+        if score > best_score:
+            best_score = score
+            best_candidate = (features['cx'], features['cy'], features['area'])
+    
+    return best_candidate
+
+
+def detect_ball_in_flight(current_frame: np.ndarray, reference_frame: np.ndarray,
+                          prev_position: Optional[Tuple[int, int]] = None) -> Optional[Tuple[int, int]]:
+    """
+    Detect ball in flight using frame differencing.
+    Returns (x, y) or None if not found.
+    """
+    if len(current_frame.shape) == 3:
+        gray_curr = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+        gray_ref = cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
+    else:
+        gray_curr = current_frame
+        gray_ref = reference_frame
+    
+    diff = cv2.absdiff(gray_curr, gray_ref)
+    _, thresh = cv2.threshold(diff, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)
+    
+    kernel = np.ones((3, 3), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    best_candidate = None
+    best_score = -1
+    
+    for contour in contours:
+        features = get_contour_features(contour, gray_curr)
+        
+        if not (MIN_BALL_AREA_FLIGHT < features['area'] < MAX_BALL_AREA_FLIGHT):
+            continue
+        if features['circularity'] < MIN_CIRCULARITY_FLIGHT:
+            continue
+        
+        score = features['circularity'] * 100
+        
+        # Prefer candidates moving in expected direction (right and up)
+        if prev_position:
+            dx = features['cx'] - prev_position[0]
+            if dx > 0:
+                score += 50
+        
+        if score > best_score:
+            best_score = score
+            best_candidate = (features['cx'], features['cy'])
+    
+    return best_candidate
+
+
+def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, Any]:
+    """
+    Calculate golf metrics from captured frames.
+    
+    Returns dict with ball_speed, launch_angle, apex_height, carry_distance.
+    """
+    if len(frames) < 5:
+        return {"error": "Not enough frames for analysis"}
+    
+    print(f"[Metrics] Analyzing {len(frames)} frames...")
+    
+    # Find ball at rest in early frames
+    rest_position = None
+    rest_frame_idx = None
+    rest_area = None
+    
+    for i in range(min(10, len(frames))):
+        result = detect_ball_at_rest(frames[i])
+        if result:
+            rest_position = (result[0], result[1])
+            rest_area = result[2]
+            rest_frame_idx = i
+            break
+    
+    if not rest_position:
+        print("[Metrics] Could not find ball at rest")
+        return {"error": "Could not detect ball at rest"}
+    
+    print(f"[Metrics] Ball at rest: {rest_position} (frame {rest_frame_idx})")
+    
+    # Use a stable reference frame for motion detection
+    reference_frame = frames[rest_frame_idx]
+    
+    # Track ball in post-impact frames
+    detections = []
+    prev_pos = rest_position
+    
+    # Start looking after the pre-trigger frames (where ball should be in motion)
+    trigger_idx = PRE_TRIGGER_FRAMES
+    
+    for i in range(trigger_idx, len(frames)):
+        pos = detect_ball_in_flight(frames[i], reference_frame, prev_pos)
+        
+        if pos:
+            # Verify it's actually moved from rest
+            dist_from_rest = np.sqrt((pos[0] - rest_position[0])**2 + 
+                                     (pos[1] - rest_position[1])**2)
+            if dist_from_rest > 20:
+                detections.append({
+                    'frame_idx': i,
+                    'x': pos[0],
+                    'y': pos[1],
+                    'timestamp_us': meta[i].get('timestamp_us', 0)
+                })
+                prev_pos = pos
+    
+    print(f"[Metrics] Found {len(detections)} post-impact detections")
+    
+    if len(detections) < 2:
+        return {"error": "Not enough ball detections in flight"}
+    
+    # Calculate ball speed from first few detections
+    velocities_mps = []
+    for i in range(min(4, len(detections) - 1)):
+        d1 = detections[i]
+        d2 = detections[i + 1]
+        
+        dx_px = d2['x'] - d1['x']
+        dy_px = d2['y'] - d1['y']
+        
+        dx_m = dx_px * METERS_PER_PIXEL
+        dy_m = -dy_px * METERS_PER_PIXEL  # Flip Y axis
+        
+        # Use timestamps if available, otherwise frame rate
+        if d1['timestamp_us'] and d2['timestamp_us']:
+            dt = (d2['timestamp_us'] - d1['timestamp_us']) / 1_000_000
+        else:
+            dt = SECONDS_PER_FRAME
+        
+        if dt > 0:
+            speed = np.sqrt(dx_m**2 + dy_m**2) / dt
+            velocities_mps.append(speed)
+    
+    if not velocities_mps:
+        return {"error": "Could not calculate velocity"}
+    
+    # Use max speed (closest to impact)
+    velocity_mps = max(velocities_mps)
+    ball_speed_mph = velocity_mps * 2.237
+    
+    print(f"[Metrics] Ball speed: {ball_speed_mph:.1f} mph")
+    
+    # Calculate launch angle
+    if len(detections) >= 2:
+        x_vals = [d['x'] for d in detections[:5]]
+        y_vals = [d['y'] for d in detections[:5]]
+        
+        x_m = [(x - rest_position[0]) * METERS_PER_PIXEL for x in x_vals]
+        y_m = [-(y - rest_position[1]) * METERS_PER_PIXEL for y in y_vals]
+        
+        if len(x_m) >= 2 and (max(x_m) - min(x_m)) > 0:
+            slope, _ = np.polyfit(x_m, y_m, 1)
+            launch_angle_deg = np.degrees(np.arctan(slope))
+        else:
+            launch_angle_deg = 12.0  # Default
+    else:
+        launch_angle_deg = 12.0
+    
+    print(f"[Metrics] Launch angle: {launch_angle_deg:.1f} degrees")
+    
+    # Simulate trajectory for apex and carry distance
+    apex_height_ft, carry_distance_yds = simulate_trajectory(velocity_mps, launch_angle_deg)
+    
+    return {
+        "ball_speed": round(ball_speed_mph, 1),
+        "launch_angle": round(launch_angle_deg, 1),
+        "apex_height": round(apex_height_ft, 1),
+        "carry_distance": round(carry_distance_yds, 1),
+        "frames_analyzed": len(frames),
+        "detections": len(detections)
+    }
+
+
+def simulate_trajectory(velocity_mps: float, launch_angle_deg: float) -> Tuple[float, float]:
+    """
+    Simulate ball trajectory with air resistance.
+    Returns (apex_height_ft, carry_distance_yds).
+    """
+    if velocity_mps <= 0 or launch_angle_deg <= 0:
+        return 0, 0
+    
+    launch_angle_rad = np.radians(launch_angle_deg)
+    
+    x, y = 0.0, 0.0
+    vx = velocity_mps * np.cos(launch_angle_rad)
+    vy = velocity_mps * np.sin(launch_angle_rad)
+    
+    dt = 0.001
+    max_time = 30
+    max_height = 0.0
+    
+    drag_constant = (0.5 * AIR_DENSITY_KG_M3 * DRAG_COEFFICIENT * 
+                     BALL_CROSS_SECTION_M2 / BALL_MASS_KG)
+    
+    t = 0
+    has_risen = False
+    
+    while t < max_time:
+        if y > max_height:
+            max_height = y
+            has_risen = True
+        
+        if has_risen and y <= 0:
+            break
+        
+        v = np.sqrt(vx**2 + vy**2)
+        
+        if v > 0:
+            drag_ax = -drag_constant * v * vx
+            drag_ay = -drag_constant * v * vy
+        else:
+            drag_ax, drag_ay = 0, 0
+        
+        ax = drag_ax
+        ay = -GRAVITY_M_S2 + drag_ay
+        
+        vx += ax * dt
+        vy += ay * dt
+        x += vx * dt
+        y += vy * dt
+        t += dt
+    
+    apex_height_ft = max_height * 3.281
+    carry_distance_yds = x * 1.094
+    
+    print(f"[Metrics] Apex: {apex_height_ft:.1f} ft, Carry: {carry_distance_yds:.1f} yds")
+    
+    return apex_height_ft, carry_distance_yds
+
+
+# =============================================================================
+# SENSOR STATE
 # =============================================================================
 
 class SensorState:
@@ -58,153 +613,91 @@ class SensorState:
         self.current_preset_version: int = 0
         self.current_preset_data: Dict[str, Any] = {}
         self.shots_processed: int = 0
-        
-        # Capture settings (can be overridden by preset)
-        self.capture_width: int = CAPTURE_WIDTH
-        self.capture_height: int = CAPTURE_HEIGHT
-        self.capture_fps: int = CAPTURE_FPS
-        self.capture_duration_ms: int = CAPTURE_DURATION_MS
     
     def apply_preset(self, club_id: str, preset_data: Dict[str, Any], version: int):
-        """Apply a club preset (configure camera settings)."""
+        """Apply a club preset."""
         self.current_club_id = club_id
         self.current_preset_version = version
         self.current_preset_data = preset_data
         
-        # Apply capture settings from preset if available
-        self.capture_duration_ms = preset_data.get('capture_duration_ms', CAPTURE_DURATION_MS)
-        
         print(f"[Sensor] Applying preset for {club_id}:")
         print(f"         Version: {version}")
-        print(f"         Capture duration: {self.capture_duration_ms}ms")
-        print(f"         Resolution: {self.capture_width}x{self.capture_height} @ {self.capture_fps}fps")
-    
-    def run_capture(self, shot_id: str) -> Path:
-        """
-        Run rpicam-vid to capture high-speed video.
-        
-        Returns:
-            Path to the output directory containing captured frames
-        """
-        # Create output directory for this shot
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(CAPTURE_OUTPUT_DIR) / f"{shot_id}_{timestamp}"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        
-        pts_path = out_dir / "capture.pts"
-        yuv_path = out_dir / "capture.yuv"
-        
-        # Build rpicam-vid command
-        cmd = [
-            "rpicam-vid",
-            "--width", str(self.capture_width),
-            "--height", str(self.capture_height),
-            "--framerate", str(self.capture_fps),
-            "--codec", "yuv420",
-            "--denoise", "off",
-            "--nopreview",
-            "--save-pts", str(pts_path),
-            "-t", str(self.capture_duration_ms),
-            "-o", str(yuv_path),
-        ]
-        
-        print(f"[Sensor] Running capture: {' '.join(cmd)}")
-        
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            print(f"[Sensor] Capture complete: {yuv_path}")
-        except subprocess.CalledProcessError as e:
-            print(f"[Sensor] Capture failed: {e.stderr}")
-            raise RuntimeError(f"rpicam-vid failed: {e.stderr}")
-        
-        return out_dir
-    
-    def extract_frames(self, out_dir: Path) -> int:
-        """
-        Extract Y-channel frames from YUV420 capture.
-        
-        Returns:
-            Number of frames extracted
-        """
-        frame_bytes = self.capture_width * self.capture_height * 3 // 2  # YUV420
-        yuv_path = out_dir / "capture.yuv"
-        
-        if not yuv_path.exists():
-            print(f"[Sensor] YUV file not found: {yuv_path}")
-            return 0
-        
-        data = yuv_path.read_bytes()
-        num_frames = len(data) // frame_bytes
-        
-        print(f"[Sensor] Extracting {num_frames} frames from {yuv_path}")
-        
-        for i in range(num_frames):
-            start = i * frame_bytes
-            y_plane = np.frombuffer(
-                data[start:start + self.capture_width * self.capture_height],
-                dtype=np.uint8
-            ).reshape(self.capture_height, self.capture_width)
-            
-            frame_path = out_dir / f"frame_{i:04d}.png"
-            cv2.imwrite(str(frame_path), y_plane)
-        
-        print(f"[Sensor] Extracted {num_frames} frames to {out_dir}")
-        return num_frames
     
     def capture_shot(self, shot_id: str, club_id: str) -> bytes:
         """
-        Capture and process a shot using rpicam-vid.
+        Capture and process a shot using circular buffer.
         
-        This:
-        1. Runs rpicam-vid to capture high-speed video
-        2. Extracts frames from YUV data
-        3. Returns placeholder metrics as CSV (real processing TBD)
+        1. Triggers the circular buffer to save pre/post frames
+        2. Saves frames to disk
+        3. Runs ball detection and metric calculation
+        4. Returns CSV with real metrics
         """
         self.shots_processed += 1
         
         print(f"[Sensor] Capturing shot {shot_id} with {club_id}")
-        print(f"         Using preset version {self.current_preset_version}")
         
-        # Run the capture
-        try:
-            out_dir = self.run_capture(shot_id)
-            num_frames = self.extract_frames(out_dir)
-        except Exception as e:
-            print(f"[Sensor] Capture error: {e}")
-            # Return error metrics
+        # Trigger the circular buffer capture
+        if not capture_system.trigger(timeout=5.0):
             csv_lines = [
                 "metric,value,unit",
-                f"error,{str(e)},",
+                "error,Capture trigger failed,",
                 f"club_id,{club_id},",
                 f"shot_id,{shot_id},",
             ]
             return ("\n".join(csv_lines) + "\n").encode("utf-8")
         
-        # Generate placeholder metrics
-        # TODO: Replace with actual ball tracking / analysis
-        csv_lines = [
-            "metric,value,unit",
-            "ball_speed,152.3,mph",
-            "launch_angle,12.5,degrees",
-            "spin_rate,2800,rpm",
-            "spin_axis,3.2,degrees",
-            "carry_distance,245,yards",
-            "total_distance,267,yards",
-            f"frames_captured,{num_frames},",
-            f"capture_fps,{self.capture_fps},",
-            f"capture_duration_ms,{self.capture_duration_ms},",
-            f"club_id,{club_id},",
-            f"shot_id,{shot_id},",
-            f"preset_version,{self.current_preset_version},",
-            f"output_dir,{out_dir},",
-        ]
+        # Get captured frames
+        frames, meta = capture_system.get_captured_frames()
+        num_frames = len(frames)
+        
+        print(f"[Sensor] Captured {num_frames} frames")
+        
+        # Create output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(CAPTURE_OUTPUT_DIR) / f"{shot_id}_{timestamp}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save frames
+        print(f"[Sensor] Saving frames to {out_dir}")
+        for i, frame in enumerate(frames):
+            frame_path = out_dir / f"frame_{i:04d}.png"
+            cv2.imwrite(str(frame_path), frame)
+        
+        # Save metadata
+        meta_path = out_dir / "burst_meta.csv"
+        with open(meta_path, 'w', newline='') as f:
+            writer = csv_module.writer(f)
+            writer.writerow(["frame_idx", "timestamp_us", "phase"])
+            trigger_idx = PRE_TRIGGER_FRAMES
+            for i, m in enumerate(meta):
+                phase = "pre" if i < trigger_idx else "post"
+                writer.writerow([i, m.get('timestamp_us', 0), phase])
+        
+        # Calculate metrics
+        metrics = calculate_metrics(frames, meta)
+        
+        # Build CSV response
+        csv_lines = ["metric,value,unit"]
+        
+        if "error" in metrics:
+            csv_lines.append(f"error,{metrics['error']},")
+        else:
+            csv_lines.append(f"ball_speed,{metrics['ball_speed']},mph")
+            csv_lines.append(f"launch_angle,{metrics['launch_angle']},degrees")
+            csv_lines.append(f"apex_height,{metrics['apex_height']},feet")
+            csv_lines.append(f"carry_distance,{metrics['carry_distance']},yards")
+        
+        csv_lines.append(f"frames_captured,{num_frames},")
+        csv_lines.append(f"club_id,{club_id},")
+        csv_lines.append(f"shot_id,{shot_id},")
+        csv_lines.append(f"output_dir,{out_dir},")
         
         csv_text = "\n".join(csv_lines) + "\n"
         
-        # Also save CSV to the capture directory
-        csv_path = out_dir / "metrics.csv"
-        csv_path.write_text(csv_text)
-        print(f"[Sensor] Metrics saved to {csv_path}")
+        # Save metrics CSV
+        metrics_path = out_dir / "metrics.csv"
+        metrics_path.write_text(csv_text)
+        print(f"[Sensor] Metrics saved to {metrics_path}")
         
         return csv_text.encode("utf-8")
 
@@ -390,16 +883,29 @@ def run_server():
     if not validate_config():
         sys.exit(1)
     
-    # Create data directory
+    # Create data directories
     os.makedirs(CSV_SOURCE_DIR, exist_ok=True)
+    os.makedirs(CAPTURE_OUTPUT_DIR, exist_ok=True)
     
     print("=" * 60)
     print("SENSOR PI SERVER")
     print("=" * 60)
     print(f"Listening on: {SENSOR_PI_IP}:{PI_COMM_PORT}")
     print(f"Protocol version: 1")
+    print(f"Capture: {CAMERA_SIZE} @ {TARGET_FPS}fps")
+    print(f"Buffer: {PRE_TRIGGER_FRAMES} pre + {POST_TRIGGER_FRAMES} post frames")
     print("=" * 60)
     print()
+    
+    # Start continuous capture
+    print("Starting continuous capture system...")
+    if capture_system.start():
+        print("Capture system running!")
+    else:
+        print("WARNING: Capture system failed to start")
+        print("Shots will fail until camera is available")
+    print()
+    
     print("Waiting for Main Pi to connect...")
     print()
     
@@ -417,24 +923,28 @@ def run_server():
             print("1. Check that SENSOR_PI_IP in config.py matches this Pi's IP")
             print("2. Run: hostname -I to see this Pi's IP addresses")
             print("3. Make sure no other program is using port", PI_COMM_PORT)
+            capture_system.stop()
             sys.exit(1)
         
         server.listen(1)
         
         # Accept connections forever
-        while True:
-            try:
-                conn, addr = server.accept()
-                with conn:
-                    conn.settimeout(60)  # 60 second timeout
-                    handle_client(conn, addr)
-            except KeyboardInterrupt:
-                print("\n[Sensor] Shutting down...")
-                break
-            except Exception as e:
-                print(f"[Sensor] Server error: {e}")
-                traceback.print_exc()
-                time.sleep(1)  # Brief pause before accepting next connection
+        try:
+            while True:
+                try:
+                    conn, addr = server.accept()
+                    with conn:
+                        conn.settimeout(60)  # 60 second timeout
+                        handle_client(conn, addr)
+                except Exception as e:
+                    print(f"[Sensor] Server error: {e}")
+                    traceback.print_exc()
+                    time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n[Sensor] Shutting down...")
+        finally:
+            capture_system.stop()
+            print("[Sensor] Goodbye!")
 
 
 if __name__ == "__main__":
