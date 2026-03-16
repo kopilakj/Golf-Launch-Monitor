@@ -426,7 +426,8 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
     """
     Calculate golf metrics from captured frames.
     
-    Returns dict with ball_speed, launch_angle, apex_height, carry_distance.
+    Returns dict with ball_speed, launch_angle, apex_height, carry_distance,
+    plus detection data for debug overlays.
     """
     if len(frames) < 5:
         return {"error": "Not enough frames for analysis"}
@@ -448,7 +449,12 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
     
     if not rest_position:
         print("[Metrics] Could not find ball at rest")
-        return {"error": "Could not detect ball at rest"}
+        return {
+            "error": "Could not detect ball at rest",
+            "_rest_position": None,
+            "_detections": [],
+            "_rest_frame_idx": None
+        }
     
     print(f"[Metrics] Ball at rest: {rest_position} (frame {rest_frame_idx})")
     
@@ -481,7 +487,12 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
     print(f"[Metrics] Found {len(detections)} post-impact detections")
     
     if len(detections) < 2:
-        return {"error": "Not enough ball detections in flight"}
+        return {
+            "error": "Not enough ball detections in flight",
+            "_rest_position": rest_position,
+            "_detections": detections,
+            "_rest_frame_idx": rest_frame_idx
+        }
     
     # Calculate ball speed from first few detections
     velocities_mps = []
@@ -506,7 +517,12 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
             velocities_mps.append(speed)
     
     if not velocities_mps:
-        return {"error": "Could not calculate velocity"}
+        return {
+            "error": "Could not calculate velocity",
+            "_rest_position": rest_position,
+            "_detections": detections,
+            "_rest_frame_idx": rest_frame_idx
+        }
     
     # Use max speed (closest to impact)
     velocity_mps = max(velocities_mps)
@@ -541,7 +557,11 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
         "apex_height": round(apex_height_ft, 1),
         "carry_distance": round(carry_distance_yds, 1),
         "frames_analyzed": len(frames),
-        "detections": len(detections)
+        "detections": len(detections),
+        # Internal data for debug overlays (prefixed with _)
+        "_rest_position": rest_position,
+        "_detections": detections,
+        "_rest_frame_idx": rest_frame_idx
     }
 
 
@@ -600,6 +620,131 @@ def simulate_trajectory(velocity_mps: float, launch_angle_deg: float) -> Tuple[f
     print(f"[Metrics] Apex: {apex_height_ft:.1f} ft, Carry: {carry_distance_yds:.1f} yds")
     
     return apex_height_ft, carry_distance_yds
+
+
+# =============================================================================
+# DEBUG OVERLAY GENERATION
+# =============================================================================
+
+def generate_debug_overlays(frames: List[np.ndarray], meta: List[Dict], 
+                            metrics: Dict[str, Any], out_dir: Path) -> int:
+    """
+    Generate debug overlay images showing ball detection.
+    
+    Args:
+        frames: List of captured frames
+        meta: List of frame metadata
+        metrics: Metrics dict from calculate_metrics (contains detection data)
+        out_dir: Output directory for debug images
+    
+    Returns:
+        Number of overlay images generated
+    """
+    # Create debug subdirectory
+    debug_dir = out_dir / "debug"
+    debug_dir.mkdir(exist_ok=True)
+    
+    # Extract detection data from metrics
+    rest_position = metrics.get("_rest_position")
+    detections = metrics.get("_detections", [])
+    rest_frame_idx = metrics.get("_rest_frame_idx", 0)
+    
+    # Build lookup for detections by frame index
+    detection_by_frame = {d['frame_idx']: d for d in detections}
+    
+    # Colors (BGR format for OpenCV)
+    GREEN = (0, 255, 0)
+    RED = (0, 0, 255)
+    BLUE = (255, 0, 0)
+    YELLOW = (0, 255, 255)
+    CYAN = (255, 255, 0)
+    WHITE = (255, 255, 255)
+    MAGENTA = (255, 0, 255)
+    
+    trigger_idx = PRE_TRIGGER_FRAMES
+    
+    print(f"[Debug] Generating overlay images...")
+    
+    for i, frame in enumerate(frames):
+        # Convert grayscale to BGR for colored overlays
+        if len(frame.shape) == 2:
+            overlay = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        else:
+            overlay = frame.copy()
+        
+        # Determine frame phase
+        if i < trigger_idx:
+            phase = "pre"
+            phase_color = CYAN
+        else:
+            phase = "post"
+            phase_color = YELLOW
+        
+        # Draw rest position marker (blue circle)
+        if rest_position:
+            cv2.circle(overlay, rest_position, 20, BLUE, 2)
+            cv2.putText(overlay, "REST", (rest_position[0] - 20, rest_position[1] - 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, BLUE, 1)
+        
+        # Draw trajectory line (connecting all detections up to this frame)
+        past_detections = [d for d in detections if d['frame_idx'] <= i]
+        if len(past_detections) > 1:
+            points = [(d['x'], d['y']) for d in past_detections]
+            for j in range(1, len(points)):
+                cv2.line(overlay, points[j-1], points[j], GREEN, 2)
+        
+        # Draw current detection (if this frame has one)
+        if i in detection_by_frame:
+            det = detection_by_frame[i]
+            pos = (det['x'], det['y'])
+            
+            # Green filled circle for detected ball
+            cv2.circle(overlay, pos, 15, GREEN, 2)
+            cv2.circle(overlay, pos, 4, GREEN, -1)
+            
+            # Position label
+            cv2.putText(overlay, f"({pos[0]}, {pos[1]})", (pos[0] + 18, pos[1] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, GREEN, 1)
+            
+            # Calculate velocity to previous detection
+            det_idx = detections.index(det)
+            if det_idx > 0:
+                prev_det = detections[det_idx - 1]
+                vx = det['x'] - prev_det['x']
+                vy = det['y'] - prev_det['y']
+                vel = np.sqrt(vx**2 + vy**2)
+                cv2.putText(overlay, f"v:{vel:.0f}px", (pos[0] + 18, pos[1] + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, CYAN, 1)
+        
+        # Draw status bar at top
+        bar_height = 35
+        cv2.rectangle(overlay, (0, 0), (overlay.shape[1], bar_height), (30, 30, 30), -1)
+        
+        # Frame info
+        frame_text = f"Frame {i:02d} | {phase.upper()}"
+        cv2.putText(overlay, frame_text, (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, phase_color, 1)
+        
+        # Detection status
+        if i in detection_by_frame:
+            cv2.putText(overlay, "DETECTED", (520, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, GREEN, 1)
+        elif i < trigger_idx and rest_position and i == rest_frame_idx:
+            cv2.putText(overlay, "REST FOUND", (510, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, BLUE, 1)
+        else:
+            cv2.putText(overlay, "---", (560, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, RED, 1)
+        
+        # Metrics summary on second line (only if we have valid metrics)
+        if "ball_speed" in metrics:
+            metrics_text = f"Speed: {metrics['ball_speed']} mph | Angle: {metrics['launch_angle']} deg | Carry: {metrics['carry_distance']} yds"
+            cv2.putText(overlay, metrics_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.35, WHITE, 1)
+        elif "error" in metrics:
+            cv2.putText(overlay, f"Error: {metrics['error']}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.35, RED, 1)
+        
+        # Save overlay image
+        overlay_path = debug_dir / f"debug_{i:04d}.png"
+        cv2.imwrite(str(overlay_path), overlay)
+    
+    print(f"[Debug] Saved {len(frames)} overlay images to {debug_dir}")
+    return len(frames)
 
 
 # =============================================================================
@@ -676,7 +821,13 @@ class SensorState:
         # Calculate metrics
         metrics = calculate_metrics(frames, meta)
         
-        # Build CSV response
+        # Generate debug overlay images
+        try:
+            generate_debug_overlays(frames, meta, metrics, out_dir)
+        except Exception as e:
+            print(f"[Sensor] Warning: Failed to generate debug overlays: {e}")
+        
+        # Build CSV response (exclude internal fields starting with _)
         csv_lines = ["metric,value,unit"]
         
         if "error" in metrics:
