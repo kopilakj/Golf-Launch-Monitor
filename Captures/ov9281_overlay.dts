@@ -1,0 +1,200 @@
+/dts-v1/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <0xffffffff>;
+		phandle = <0x04>;
+
+		__overlay__ {
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			status = "okay";
+
+			ov9281@60 {
+				compatible = "ovti,ov9281";
+				reg = <0x60>;
+				status = "okay";
+				clocks = <0xffffffff>;
+				clock-names = "xvclk";
+				avdd-supply = <0xffffffff>;
+				dovdd-supply = <0xffffffff>;
+				dvdd-supply = <0xffffffff>;
+				rotation = <0x00>;
+				orientation = <0x02>;
+				phandle = <0x03>;
+
+				port {
+
+					endpoint {
+						clock-lanes = <0x00>;
+						data-lanes = <0x01 0x02>;
+						link-frequencies = <0x00 0x17d78400>;
+						remote-endpoint = <0x01>;
+						phandle = <0x02>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <0xffffffff>;
+		phandle = <0x05>;
+
+		__overlay__ {
+			status = "okay";
+			phandle = <0x08>;
+
+			port {
+
+				endpoint {
+					remote-endpoint = <0x02>;
+					data-lanes = <0x01 0x02>;
+					phandle = <0x01>;
+				};
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@3 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@4 {
+		target = <0xffffffff>;
+		phandle = <0x06>;
+
+		__overlay__ {
+			status = "okay";
+			clock-frequency = <0x16e3600>;
+		};
+	};
+
+	fragment@5 {
+		target = <0xffffffff>;
+
+		__dormant__ {
+			compatible = "brcm,bcm2835-unicam-legacy";
+		};
+	};
+
+	fragment@6 {
+		target = <0xffffffff>;
+		phandle = <0x07>;
+
+		__dormant__ {
+			startup-delay-us = <0x4e20>;
+			off-on-delay-us = <0x7530>;
+		};
+	};
+
+	fragment@7 {
+		target = <0x01>;
+
+		__overlay__ {
+			clock-noncontinuous;
+		};
+	};
+
+	fragment@8 {
+		target = <0x02>;
+
+		__overlay__ {
+			clock-noncontinuous;
+		};
+	};
+
+	__overrides__ {
+		rotation = [00 00 00 03 72 6f 74 61 74 69 6f 6e 3a 30 00];
+		orientation = [00 00 00 03 6f 72 69 65 6e 74 61 74 69 6f 6e 3a 30 00];
+		media-controller = [00 00 00 00 21 35 00];
+		cam0 = [00 00 00 04 74 61 72 67 65 74 3a 30 3d 00 ff ff ff ff 00 00 00 05 74 61 72 67 65 74 3a 30 3d 00 ff ff ff ff 00 00 00 06 74 61 72 67 65 74 3a 30 3d 00 ff ff ff ff 00 00 00 03 63 6c 6f 63 6b 73 3a 30 3d 00 ff ff ff ff 00 00 00 03 61 76 64 64 2d 73 75 70 70 6c 79 3a 30 3d 00 ff ff ff ff 00 00 00 07 74 61 72 67 65 74 3a 30 3d 00 ff ff ff ff];
+		arducam = [00 00 00 00 2b 36 00];
+		clk-continuous = [00 00 00 00 2d 37 2d 38 00];
+	};
+
+	__symbols__ {
+		i2c_frag = "/fragment@0";
+		cam_node = "/fragment@0/__overlay__/ov9281@60";
+		cam_endpoint = "/fragment@0/__overlay__/ov9281@60/port/endpoint";
+		csi_frag = "/fragment@1";
+		csi = "/fragment@1/__overlay__";
+		csi_ep = "/fragment@1/__overlay__/port/endpoint";
+		clk_frag = "/fragment@4";
+		reg_frag = "/fragment@6";
+	};
+
+	__fixups__ {
+		i2c_csi_dsi = "/fragment@0:target:0";
+		cam1_clk = "/fragment@0/__overlay__/ov9281@60:clocks:0", "/fragment@4:target:0";
+		cam1_reg = "/fragment@0/__overlay__/ov9281@60:avdd-supply:0", "/fragment@6:target:0";
+		cam_dummy_reg = "/fragment@0/__overlay__/ov9281@60:dovdd-supply:0", "/fragment@0/__overlay__/ov9281@60:dvdd-supply:0";
+		csi1 = "/fragment@1:target:0", "/fragment@5:target:0";
+		i2c0if = "/fragment@2:target:0";
+		i2c0mux = "/fragment@3:target:0";
+		i2c_csi_dsi0 = "/__overrides__:cam0:14";
+		csi0 = "/__overrides__:cam0:32";
+		cam0_clk = "/__overrides__:cam0:50", "/__overrides__:cam0:68";
+		cam0_reg = "/__overrides__:cam0:91", "/__overrides__:cam0:109";
+	};
+
+	__local_fixups__ {
+
+		fragment@0 {
+
+			__overlay__ {
+
+				ov9281@60 {
+
+					port {
+
+						endpoint {
+							remote-endpoint = <0x00>;
+						};
+					};
+				};
+			};
+		};
+
+		fragment@1 {
+
+			__overlay__ {
+
+				port {
+
+					endpoint {
+						remote-endpoint = <0x00>;
+					};
+				};
+			};
+		};
+
+		fragment@7 {
+			target = <0x00>;
+		};
+
+		fragment@8 {
+			target = <0x00>;
+		};
+
+		__overrides__ {
+			rotation = <0x00>;
+			orientation = <0x00>;
+			cam0 = <0x00 0x12 0x24 0x36 0x48 0x5f>;
+		};
+	};
+};
