@@ -3,15 +3,17 @@ from smbus2 import i2c_msg, SMBus
 import time
 
 cam = Picamera2()
-config = cam.create_video_configuration(raw={"size": (640, 400), "format": 
-"R8"}, buffer_count=4)
+config = cam.create_video_configuration(
+    raw={"size": (640, 400), "format": "R8"},
+    buffer_count=4
+)
 cam.configure(config)
 cam.start()
 
 frame_us = int(1_000_000 / 30)
 cam.set_controls({
     "FrameDurationLimits": (frame_us, frame_us),
-    "ExposureTime": 200,
+    "ExposureTime": 1000,
 })
 time.sleep(1)
 
@@ -31,16 +33,39 @@ def read_reg(addr, reg):
     bus.i2c_rdwr(w, r)
     return list(r)[0]
 
-configs = [0x0D, 0x09, 0x0C, 0x08]
+# Read all strobe registers first
+print("Before:")
+for reg in range(0x3920, 0x3930):
+    val = read_reg(0x60, reg)
+    print("  0x%04X = 0x%02X" % (reg, val))
 
-for val in configs:
-    write_reg(0x60, 0x3006, val)
-    write_reg(0x60, 0x3027, 0x00)
-    v1 = read_reg(0x60, 0x3006)
-    v2 = read_reg(0x60, 0x3027)
-    print("0x3006=" + hex(v1) + " 0x3027=" + hex(v2))
-    print("Check scope for 10 seconds...")
-    time.sleep(10)
+# Enable strobe output on pin
+write_reg(0x60, 0x3006, 0x0C)
+
+# Set large strobe span (pulse width)
+# strobe_frame_span[31:0] across 0x3925-0x3928
+write_reg(0x60, 0x3925, 0x00)
+write_reg(0x60, 0x3926, 0x01)
+write_reg(0x60, 0x3927, 0x00)
+write_reg(0x60, 0x3928, 0x00)
+
+# Set shift to 0 (pulse starts at integration start)
+write_reg(0x60, 0x3921, 0x00)
+write_reg(0x60, 0x3922, 0x00)
+write_reg(0x60, 0x3923, 0x00)
+write_reg(0x60, 0x3924, 0x00)
+
+# Try enabling strobe via 0x3920 and 0x3929
+write_reg(0x60, 0x3920, 0x01)
+write_reg(0x60, 0x3929, 0x01)
+
+print("\nAfter:")
+for reg in range(0x3920, 0x3930):
+    val = read_reg(0x60, reg)
+    print("  0x%04X = 0x%02X" % (reg, val))
+
+print("\nStrobe configured. Check scope for 30 sec...")
+time.sleep(30)
 
 bus.close()
 cam.close()
