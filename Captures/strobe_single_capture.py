@@ -14,7 +14,7 @@ import numpy as np
 # Camera settings
 WIDTH, HEIGHT = 640, 400
 TARGET_FPS = 300
-EXPOSURE_US = 200
+EXPOSURE_US = 994
 
 # Setup camera
 cam = Picamera2()
