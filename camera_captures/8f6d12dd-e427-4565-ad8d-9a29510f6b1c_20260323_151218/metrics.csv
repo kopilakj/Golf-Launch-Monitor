@@ -1,0 +1,6 @@
+metric,value,unit
+error,Could not detect ball at rest,
+frames_captured,45,
+club_id,pitching_wedge,
+shot_id,8f6d12dd-e427-4565-ad8d-9a29510f6b1c,
+output_dir,/home/bottompi/Golf-Launch-Monitor/Captures/camera_captures/8f6d12dd-e427-4565-ad8d-9a29510f6b1c_20260323_151218,
