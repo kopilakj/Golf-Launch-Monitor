@@ -64,7 +64,7 @@ BUFFER_SIZE = PRE_TRIGGER_FRAMES + 10  # Circular buffer size
 # Camera settings
 CAMERA_SIZE = (CAPTURE_WIDTH, CAPTURE_HEIGHT)
 TARGET_FPS = CAPTURE_FPS
-EXPOSURE_US = 300
+EXPOSURE_US = 500
 ANALOGUE_GAIN = 4.0
 BUFFER_COUNT = 4
 
@@ -97,16 +97,22 @@ DRAG_COEFFICIENT = 0.25
 BRIGHTNESS_THRESHOLD = 80
 MOTION_THRESHOLD = 25
 MIN_BALL_AREA_REST = 40
-MAX_BALL_AREA_REST = 300
-MIN_BALL_AREA_FLIGHT = 20
-MAX_BALL_AREA_FLIGHT = 500
+MAX_BALL_AREA_REST = 500
+MIN_BALL_AREA_FLIGHT = 15
+MAX_BALL_AREA_FLIGHT = 400
 MIN_CIRCULARITY_REST = 0.4
-MIN_CIRCULARITY_FLIGHT = 0.15
-REST_SEARCH_RADIUS = 80
+MIN_CIRCULARITY_FLIGHT = 0.35
+REST_SEARCH_RADIUS = 40
 
-# Known ball rest position (approximate)
-BALL_REST_X = 223
-BALL_REST_Y = 270
+# Known ball rest position (bottom camera view)
+BALL_REST_X = 249
+BALL_REST_Y = 216
+
+# Dynamic ROI box for tracking
+ROI_REST_HALF = 30
+ROI_FLIGHT_HALF = 40
+ROI_GROWTH_PER_MISS = 10
+ROI_MAX_HALF = 80
 
 
 # =============================================================================
@@ -374,114 +380,126 @@ def get_contour_features(contour, gray_frame=None) -> dict:
     }
 
 
-def detect_ball_at_rest(frame: np.ndarray) -> Optional[Tuple[int, int, float]]:
+def apply_roi_box(gray: np.ndarray, cx: int, cy: int, half: int) -> np.ndarray:
+    """Zero out everything outside an ROI box."""
+    masked = np.zeros_like(gray)
+    x1 = max(0, cx - half)
+    y1 = max(0, cy - half)
+    x2 = min(gray.shape[1], cx + half)
+    y2 = min(gray.shape[0], cy + half)
+    masked[y1:y2, x1:x2] = gray[y1:y2, x1:x2]
+    return masked
+
+
+def detect_ball_at_rest(frame: np.ndarray, hint: Optional[Tuple[int, int]] = None) -> Optional[Tuple[int, int, float]]:
     """
-    Detect ball at rest position.
+    Detect ball at rest position within a tight ROI box.
     Returns (x, y, area) or None if not found.
     """
-    if len(frame.shape) == 3:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = frame
-    
-    _, thresh = cv2.threshold(gray, BRIGHTNESS_THRESHOLD, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+    gray = frame if len(frame.shape) == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    target_x = hint[0] if hint else BALL_REST_X
+    target_y = hint[1] if hint else BALL_REST_Y
+    gray_roi = apply_roi_box(gray, target_x, target_y, ROI_REST_HALF)
+
     best_candidate = None
     best_score = -1
-    
-    for contour in contours:
-        features = get_contour_features(contour, gray)
-        
-        if not (MIN_BALL_AREA_REST < features['area'] < MAX_BALL_AREA_REST):
+
+    for thresh_val in [BRIGHTNESS_THRESHOLD, BRIGHTNESS_THRESHOLD - 15, BRIGHTNESS_THRESHOLD + 15]:
+        if thresh_val < 40 or thresh_val > 200:
             continue
-        if features['circularity'] < MIN_CIRCULARITY_REST:
-            continue
-        
-        dist = np.sqrt((features['cx'] - BALL_REST_X)**2 + (features['cy'] - BALL_REST_Y)**2)
-        if dist > REST_SEARCH_RADIUS:
-            continue
-        
-        score = 100 - dist + features['circularity'] * 50
-        if score > best_score:
-            best_score = score
-            best_candidate = (features['cx'], features['cy'], features['area'])
-    
+        _, thresh = cv2.threshold(gray_roi, thresh_val, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            features = get_contour_features(contour, gray)
+            if not (MIN_BALL_AREA_REST < features['area'] < MAX_BALL_AREA_REST):
+                continue
+            if features['circularity'] < MIN_CIRCULARITY_REST:
+                continue
+            dist = np.sqrt((features['cx'] - target_x)**2 + (features['cy'] - target_y)**2)
+            if dist > REST_SEARCH_RADIUS:
+                continue
+            score = 100 - dist + features['circularity'] * 50
+            if score > best_score:
+                best_score = score
+                best_candidate = (features['cx'], features['cy'], features['area'])
+
     return best_candidate
 
 
 def detect_ball_in_flight(current_frame: np.ndarray, reference_frame: np.ndarray,
-                          prev_position: Optional[Tuple[int, int]] = None) -> Optional[Tuple[int, int]]:
+                          prev_position: Optional[Tuple[int, int]] = None,
+                          roi_center: Optional[Tuple[int, int]] = None,
+                          roi_half: int = ROI_FLIGHT_HALF) -> Optional[Tuple[int, int]]:
     """
-    Detect ball in flight using frame differencing.
+    Detect ball in flight using frame differencing within a dynamic ROI box.
     Returns (x, y) or None if not found.
     """
-    if len(current_frame.shape) == 3:
-        gray_curr = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-        gray_ref = cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
-    else:
-        gray_curr = current_frame
-        gray_ref = reference_frame
-    
+    gray_curr = current_frame if len(current_frame.shape) == 2 else cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+    gray_ref = reference_frame if len(reference_frame.shape) == 2 else cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
+
     diff = cv2.absdiff(gray_curr, gray_ref)
-    _, thresh = cv2.threshold(diff, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)
-    
-    kernel = np.ones((3, 3), np.uint8)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+    if roi_center:
+        diff = apply_roi_box(diff, int(roi_center[0]), int(roi_center[1]), roi_half)
+
     best_candidate = None
     best_score = -1
-    
-    for contour in contours:
-        features = get_contour_features(contour, gray_curr)
-        
-        if not (MIN_BALL_AREA_FLIGHT < features['area'] < MAX_BALL_AREA_FLIGHT):
+
+    for thresh_val in [MOTION_THRESHOLD, MOTION_THRESHOLD - 5, MOTION_THRESHOLD + 10]:
+        if thresh_val < 10:
             continue
-        if features['circularity'] < MIN_CIRCULARITY_FLIGHT:
-            continue
-        
-        score = features['circularity'] * 100
-        
-        # Prefer candidates moving in expected direction (right and up)
-        if prev_position:
-            dx = features['cx'] - prev_position[0]
-            if dx > 0:
-                score += 50
-        
-        if score > best_score:
-            best_score = score
-            best_candidate = (features['cx'], features['cy'])
-    
+        _, thresh = cv2.threshold(diff, thresh_val, 255, cv2.THRESH_BINARY)
+        kernel = np.ones((3, 3), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            features = get_contour_features(contour, gray_curr)
+            if not (MIN_BALL_AREA_FLIGHT < features['area'] < MAX_BALL_AREA_FLIGHT):
+                continue
+            if features['circularity'] < MIN_CIRCULARITY_FLIGHT:
+                continue
+            # Reject elongated shapes (club shaft)
+            bbox_w = features['bbox'][2]
+            bbox_h = features['bbox'][3]
+            aspect = max(bbox_w, bbox_h) / max(1, min(bbox_w, bbox_h))
+            if aspect > 3.0:
+                continue
+
+            score = features['circularity'] * 100
+            if prev_position:
+                dy = features['cy'] - prev_position[1]
+                if dy < 0:  # Ball moves upward from bottom camera
+                    score += 40
+            if score > best_score:
+                best_score = score
+                best_candidate = (features['cx'], features['cy'])
+
     return best_candidate
 
 
 def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, Any]:
     """
     Calculate golf metrics from captured frames.
-    
-    Returns dict with ball_speed, launch_angle, apex_height, carry_distance,
-    plus detection data for debug overlays.
+    Uses dynamic ROI tracking and ball-still-at-rest detection.
     """
     if len(frames) < 5:
         return {"error": "Not enough frames for analysis"}
-    
+
     print(f"[Metrics] Analyzing {len(frames)} frames...")
-    
+
     # Find ball at rest in early frames
     rest_position = None
     rest_frame_idx = None
-    rest_area = None
-    
+
     for i in range(min(10, len(frames))):
         result = detect_ball_at_rest(frames[i])
         if result:
             rest_position = (result[0], result[1])
-            rest_area = result[2]
             rest_frame_idx = i
             break
-    
+
     if not rest_position:
         print("[Metrics] Could not find ball at rest")
         return {
@@ -490,25 +508,43 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
             "_detections": [],
             "_rest_frame_idx": None
         }
-    
+
     print(f"[Metrics] Ball at rest: {rest_position} (frame {rest_frame_idx})")
-    
-    # Use a stable reference frame for motion detection
+
+    # Use latest pre-trigger frame as reference (will update if ball still at rest)
     reference_frame = frames[rest_frame_idx]
-    
-    # Track ball in post-impact frames
+
+    # Track ball in post-trigger frames with dynamic ROI
     detections = []
     prev_pos = rest_position
-    
-    # Start looking after the pre-trigger frames (where ball should be in motion)
+    roi_center = rest_position
+    roi_half = ROI_FLIGHT_HALF
+    ball_departed = False
+    frames_missed = 0
+
     trigger_idx = PRE_TRIGGER_FRAMES
-    
+
     for i in range(trigger_idx, len(frames)):
-        pos = detect_ball_in_flight(frames[i], reference_frame, prev_pos)
-        
+        # Check if ball is still at rest before using motion detection
+        if not ball_departed:
+            rest_check = detect_ball_at_rest(frames[i], hint=rest_position)
+            if rest_check:
+                dist = np.sqrt((rest_check[0] - rest_position[0])**2 +
+                               (rest_check[1] - rest_position[1])**2)
+                if dist < 20:
+                    # Ball still at rest — update reference frame and skip
+                    reference_frame = frames[i]
+                    continue
+            # Ball gone from rest position — impact occurred
+            ball_departed = True
+            print(f"[Metrics] Ball departed at frame {i}")
+
+        # Motion detection with dynamic ROI
+        pos = detect_ball_in_flight(frames[i], reference_frame, prev_pos,
+                                    roi_center=roi_center, roi_half=roi_half)
+
         if pos:
-            # Verify it's actually moved from rest
-            dist_from_rest = np.sqrt((pos[0] - rest_position[0])**2 + 
+            dist_from_rest = np.sqrt((pos[0] - rest_position[0])**2 +
                                      (pos[1] - rest_position[1])**2)
             if dist_from_rest > 20:
                 detections.append({
@@ -518,9 +554,23 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
                     'timestamp_us': meta[i].get('timestamp_us', 0)
                 })
                 prev_pos = pos
-    
+                roi_center = pos  # Move ROI to follow ball
+                roi_half = ROI_FLIGHT_HALF  # Reset ROI size on hit
+                frames_missed = 0
+
+                # Ball exiting frame
+                if pos[0] > 620 or pos[1] < 20 or pos[0] < 20:
+                    break
+                continue
+
+        # Missed detection — grow ROI, predict position
+        frames_missed += 1
+        roi_half = min(roi_half + ROI_GROWTH_PER_MISS, ROI_MAX_HALF)
+        if frames_missed >= 3 and len(detections) > 0:
+            break  # Lost the ball
+
     print(f"[Metrics] Found {len(detections)} post-impact detections")
-    
+
     if len(detections) < 2:
         return {
             "error": "Not enough ball detections in flight",
@@ -528,29 +578,29 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
             "_detections": detections,
             "_rest_frame_idx": rest_frame_idx
         }
-    
+
     # Calculate ball speed from first few detections
     velocities_mps = []
     for i in range(min(4, len(detections) - 1)):
         d1 = detections[i]
         d2 = detections[i + 1]
-        
+
         dx_px = d2['x'] - d1['x']
         dy_px = d2['y'] - d1['y']
-        
+
         dx_m = dx_px * METERS_PER_PIXEL
         dy_m = -dy_px * METERS_PER_PIXEL  # Flip Y axis
-        
+
         # Use timestamps if available, otherwise frame rate
         if d1['timestamp_us'] and d2['timestamp_us']:
-            dt = (d2['timestamp_us'] - d1['timestamp_us']) / 1_000_000
+            dt = (d2['timestamp_us'] - d1['timestamp_us']) / 1_000_000_000  # Nanoseconds to seconds
         else:
             dt = SECONDS_PER_FRAME
-        
+
         if dt > 0:
             speed = np.sqrt(dx_m**2 + dy_m**2) / dt
             velocities_mps.append(speed)
-    
+
     if not velocities_mps:
         return {
             "error": "Could not calculate velocity",
@@ -558,34 +608,34 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
             "_detections": detections,
             "_rest_frame_idx": rest_frame_idx
         }
-    
+
     # Use max speed (closest to impact)
     velocity_mps = max(velocities_mps)
     ball_speed_mph = velocity_mps * 2.237
-    
+
     print(f"[Metrics] Ball speed: {ball_speed_mph:.1f} mph")
-    
+
     # Calculate launch angle
     if len(detections) >= 2:
         x_vals = [d['x'] for d in detections[:5]]
         y_vals = [d['y'] for d in detections[:5]]
-        
+
         x_m = [(x - rest_position[0]) * METERS_PER_PIXEL for x in x_vals]
         y_m = [-(y - rest_position[1]) * METERS_PER_PIXEL for y in y_vals]
-        
+
         if len(x_m) >= 2 and (max(x_m) - min(x_m)) > 0:
             slope, _ = np.polyfit(x_m, y_m, 1)
             launch_angle_deg = np.degrees(np.arctan(slope))
         else:
-            launch_angle_deg = 12.0  # Default
+            launch_angle_deg = 12.0
     else:
         launch_angle_deg = 12.0
-    
+
     print(f"[Metrics] Launch angle: {launch_angle_deg:.1f} degrees")
-    
+
     # Simulate trajectory for apex and carry distance
     apex_height_ft, carry_distance_yds = simulate_trajectory(velocity_mps, launch_angle_deg)
-    
+
     return {
         "ball_speed": round(ball_speed_mph, 1),
         "launch_angle": round(launch_angle_deg, 1),
@@ -593,7 +643,6 @@ def calculate_metrics(frames: List[np.ndarray], meta: List[Dict]) -> Dict[str, A
         "carry_distance": round(carry_distance_yds, 1),
         "frames_analyzed": len(frames),
         "detections": len(detections),
-        # Internal data for debug overlays (prefixed with _)
         "_rest_position": rest_position,
         "_detections": detections,
         "_rest_frame_idx": rest_frame_idx
