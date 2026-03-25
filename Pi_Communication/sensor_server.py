@@ -30,6 +30,7 @@ from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 import cv2
 from picamera2 import Picamera2
+from smbus2 import SMBus, i2c_msg
 
 # Import our modules
 from config import (
@@ -134,6 +135,11 @@ class CircularBufferCapture:
         self.captured_frames: List[np.ndarray] = []
         self.captured_meta: List[Dict] = []
         self.capture_complete = Event()
+
+        # IR strobe I2C control
+        self.i2c_bus: Optional[SMBus] = None
+        self.strobe_on_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x08])
+        self.strobe_off_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x00])
         
     def setup_camera(self) -> bool:
         """Initialize the camera for continuous capture."""
@@ -158,15 +164,36 @@ class CircularBufferCapture:
             })
             
             print(f"[Capture] Camera ready: {CAMERA_SIZE} @ {TARGET_FPS}fps")
+
+            # Initialize IR strobe via I2C
+            try:
+                self.i2c_bus = SMBus(10)
+                # Set FSTROBE pin as output (0x3006 = 0x0C)
+                self.i2c_bus.i2c_rdwr(i2c_msg.write(0x60, [0x30, 0x06, 0x0C]))
+                # Enable register-controlled strobe mode (0x3027 bit[3] = 1)
+                self.i2c_bus.i2c_rdwr(i2c_msg.write(0x60, [0x30, 0x27, 0x08]))
+                print("[Capture] IR strobe initialized on I2C bus 10")
+            except Exception as e:
+                print(f"[Capture] IR strobe init failed (continuing without strobe): {e}")
+                self.i2c_bus = None
+
             return True
-            
+
         except Exception as e:
             print(f"[Capture] Camera setup failed: {e}")
             traceback.print_exc()
             return False
     
     def cleanup_camera(self):
-        """Stop and close the camera."""
+        """Stop and close the camera and IR strobe."""
+        if self.i2c_bus:
+            try:
+                # Turn strobe off before closing
+                self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
+                self.i2c_bus.close()
+            except:
+                pass
+            self.i2c_bus = None
         if self.camera:
             try:
                 self.camera.close()
@@ -180,12 +207,16 @@ class CircularBufferCapture:
         
         while not self.stop_event.is_set():
             try:
-                # Capture frame
+                # Capture frame with IR strobe
+                if self.i2c_bus:
+                    self.i2c_bus.i2c_rdwr(self.strobe_on_msg)
                 req = self.camera.capture_request()
                 meta = req.get_metadata()
                 raw = req.make_array("raw").copy()
                 req.release()
-                
+                if self.i2c_bus:
+                    self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
+
                 timestamp_us = meta.get("SensorTimestamp", time.monotonic_ns() // 1000)
                 
                 # Add to circular buffer
@@ -222,10 +253,14 @@ class CircularBufferCapture:
         # Capture post-trigger frames
         for i in range(POST_TRIGGER_FRAMES):
             try:
+                if self.i2c_bus:
+                    self.i2c_bus.i2c_rdwr(self.strobe_on_msg)
                 req = self.camera.capture_request()
                 meta = req.get_metadata()
                 raw = req.make_array("raw").copy()
                 req.release()
+                if self.i2c_bus:
+                    self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
                 
                 timestamp_us = meta.get("SensorTimestamp", time.monotonic_ns() // 1000)
                 
