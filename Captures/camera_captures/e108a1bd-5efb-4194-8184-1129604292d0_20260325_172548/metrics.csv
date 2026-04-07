@@ -1,0 +1,9 @@
+metric,value,unit
+ball_speed,1.9,mph
+launch_angle,36.9,degrees
+apex_height,0.0,feet
+carry_distance,0.1,yards
+frames_captured,45,
+club_id,pitching_wedge,
+shot_id,e108a1bd-5efb-4194-8184-1129604292d0,
+output_dir,/home/bottompi/Golf-Launch-Monitor/Captures/camera_captures/e108a1bd-5efb-4194-8184-1129604292d0_20260325_172548,
