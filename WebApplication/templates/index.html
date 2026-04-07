@@ -1,174 +1,65 @@
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Who's Playing</title>
-        <style>
-            html {
-                height: 100%;
-                margin: 0;
-                padding: 0;
-                font-size: 20px
-            }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
 
-            body {
-                background-color: #d9d9d9;
-                font-family: "Consolas", monospace;
-                text-align: center;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-            }
+    <!-- IMPORTANT FOR MOBILE -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-            .main-container {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }
+    <title>Who's Playing</title>
 
-            /* Who's Playing Container*/
-            h1 {
-                background-color: #505050;
-                color: white;
-                display: inline-block;
-                padding: 5px 15px;
-                border-radius: 20px;
-                margin-top: 15px;
-                margin-bottom: 60px;
-            }
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=5">
+</head>
 
-            .player-buttons {
-                display: flex;
-                flex-wrap: wrap;
-                justify-content: center;
-                margin: 20px auto;
-                gap: 40px;
-                max-width: 850px;
-            }
+<body>
+    <div class="main-container">
+        <h1>WHO'S PLAYING?</h1>
 
-            .player-container {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }
+        <div class="player-buttons">
+            {% for player in players %}
+            <div class="player-container">
+                <a href="{{ url_for('select_player', player_id=player['id']) }}">
+                    <div class="player">
+                        <span>P{{ loop.index }}</span>
+                    </div>
+                    <div class="label">
+                        {{ player['name'] }}
+                    </div>
+                </a>
+            </div>
+            {% endfor %}
+        </div>
 
-            /* Player Button */
-            .player {
-                width: 110px;
-                height: 110px;
-                background-color: #505050;
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                cursor: pointer;
-                transition: background-color 0.2s;
-            }
-
-            /* P1, P2, P3, P4 */
-            .player span {
-                color: #7ED957;
-                font-size: 2.5rem;
-                font-weight: bold;
-            }
-
-            /* Player 1, Player 2, Player 3, Player 4 Label */
-            .label {
-                font-size: 0.8rem;
-                font-weight: bold;
-                color: black;
-                line-height: 0.5;
-                margin-top: 15px;
-                align-items: center;
-            }
-
-            .bottom-buttons {
-                display: flex;
-                justify-content: center;
-                gap: 25px;
-                margin-top: 40px;
-            }
-
-            /* Icon for Bottom Buttons */ 
-            .icon {
-                width: 65px;
-                height: 65px;
-                background-color: #505050;
-                border-radius: 50%;
-                color: white;
-                font-size: 2.2rem;
-                line-height: 60px;
-            }
-
-            /* Add, Edit, Settings, Shut Down Label */ 
-            .button-label {
-                font-weight: bold;
-                font-size: 0.6rem;
-                margin-top: 10px;
-            }
-
-            .icon-container {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }
-
-            .player:hover {
-                background-color: white;
-                cursor: pointer;
-            }
-
-            .icon:hover{
-                background-color: #7ED957;
-            }
-            
-            a {
-                text-decoration: none;
-                color: inherit;
-            }
-
-        </style>
-    </head>
-    <body>
-        <div class="main-container">
-            <h1>WHO'S PLAYING?</h1>
-
-            <div class="player-buttons">
-                {% for player in players %}
-                <div class="player-container">
-                    <a href = "{{ url_for('select_player', player_id=player['id']) }}">
-                        <div class="player">
-                            <span>P{{ loop.index }}</span>
-                        </div>
-                        <div class="label">
-                            {{ player['name'] }}
-                        </div>
-                    </a>
-                </div>
-                {% endfor %}
+        <div class="bottom-buttons">
+            <div class="icon-container">
+                <a href="{{ url_for('add_player') }}">
+                    <div class="icon">+</div>
+                    <div class="button-label">ADD</div>
+                </a>
             </div>
 
-            <div class="bottom-buttons">
-                <div class="icon-container">
-                    <a href="{{ url_for('add_player')}}">
-                        <div class="icon">&#43</div>
-                        <div class="button-label">ADD USER</div>
-                    </a>
-                </div>
+            <div class="icon-container">
+                <a href="{{ url_for('edit_users') }}">
+                    <div class="icon">&#9998</div>
+                    <div class="button-label">EDIT</div>
+                </a>
+            </div>
 
-                <div class="icon-container">
-                    <a href="{{ url_for('edit_users')}}">
-                        <div class="icon">&#9998</div>
-                        <div class="button-label">EDIT USER</div>
-                    </a>
-                </div>
-
-                <div class="icon-container">
-                    <a href="{{ url_for('delete_users')}}">
-                        <div class="icon">&#128465</div>
-                        <div class="button-label">DELETE USER</div>
-                    </a>
-                </div>
+            <div class="icon-container">
+                <a href="{{ url_for('delete_users') }}">
+                    <div class="icon">
+                        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 6h18"/>
+                            <path d="M8 6V4h8v2"/>
+                            <path d="M19 6l-1 14H6L5 6"/>
+                            <path d="M10 11v6"/>
+                            <path d="M14 11v6"/>
+                        </svg>
+                    </div>
+                    <div class="button-label">DELETE</div>
+                </a>
             </div>
         </div>
-    </body>
+    </div>
+</body>
 </html>

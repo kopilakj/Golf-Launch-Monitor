@@ -1,105 +1,32 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Add Player</title>
-        <style>
-            html {
-                height: 100%;
-                margin: 0;
-                padding: 0;
-                font-size: 20px
-            }
+<head>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=2">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add Player</title>
+</head>
+<body>
+    <div class="main-container">
+        <h1>Add Player</h1>
 
-            body {
-                background-color: #d9d9d9;
-                font-family: "Consolas", monospace;
-                text-align: center;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-            }
-
-            .main-container {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }
-
-            h1 {
-                background-color: #505050;
-                color: white;
-                display: inline-block;
-                padding: 5px 15px;
-                border-radius: 20px;
-                margin-top: 15px;
-                margin-bottom: 60px;
-            }
-
-            input[type=text] {
-                padding: 10px;
-                font-size: 1 rem;
-                margin-bottom: 20px;
-                border-radius: 8px;
-                border: 1px solid #505050;
-            }
-
-            .button {
-                padding: 10px 20px;
-                font-size: 1 rem;
-                background-color: #505050;
-                color: #7ED957;
-                border: none;
-                border-radius: 10px;
-                cursor: pointer;
-            }
-
-            button:hover {
-                background-color: #7ED957;
-            }
-
-            .back-button {
-                background-color: #505050;
-                color: #7ED957;
-                font-weight: bold;
-                padding: 10px 25px;
-                border: none;
-                border-radius: 10px;
-                cursor: pointer;
-                font-size: 0.8rem;
-            }
-
-            .back-container {
-                width: 100%;
-                margin-top: 50px;
-                text-align: center;
-            }
-
-            .back-button:hover {
-                background-color: white;
-            }
-
-        </style>
-    </head>
-    <body>
-        <div class="main-container">
-            <h1> Add New Player </h1>
-
+        <div class="card">
             <form method="POST">
                 <input 
                     type="text" 
                     name="name" 
-                    placeholder="Enter Player Name" required>
-                <button type="submit">Add Player</button>
+                    placeholder="Enter Player Name" 
+                    required>
+
+                <button type="submit">ADD PLAYER</button>
             </form>
-
-            <div class="back-container">
-                <a href="{{ url_for('whos_playing') }}">
-                    <button class="back-button">&#8592 BACK</button>
-                </a>
-            </div>
-
         </div>
-    </body>
+
+        <div class="back-container">
+            <a href="{{ url_for('whos_playing') }}">
+                <button class="back-button glow">&#8592 BACK</button>
+            </a>
+        </div>
+    </div>
+</body>
 </html>

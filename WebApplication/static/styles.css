@@ -1,0 +1,398 @@
+/* === COLOR SYSTEM === */
+:root {
+    --bg: #060b1a;
+    --card: rgba(20, 30, 60, 0.6);
+    --blue: #3aa0ff;
+    --cyan: #00eaff;
+    --purple: #7a5cff;
+    --green: #7ED957;
+}
+
+/* === GLOBAL FIXES (IMPORTANT) === */
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+}
+
+body {
+    font-family: 'Segoe UI', sans-serif;
+    color: white;
+
+    min-height: 100vh;
+    min-height: 100dvh;
+
+    display: flex;
+    justify-content: center;
+}
+
+/* remove link styling */
+a {
+    text-decoration: none;
+    color: inherit;
+}
+
+/* === MAIN CONTAINERS === */
+.container,
+.main-container {
+    width: 100%;
+    max-width: 500px;
+
+    padding: 30px 15px 40px;
+    text-align: center;
+
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+}
+
+/* === HEADER === */
+h1 {
+    font-size: 2.4rem;
+    margin-bottom: 20px;
+    margin-top: 5px;
+
+    color: var(--cyan);
+    text-shadow: 0 0 12px var(--cyan);
+}
+
+/* === SUBTEXT === */
+.club-subtext {
+    margin-top: 5px;
+    margin-bottom: 60px;
+    font-size: 1.4rem;
+    color: #cfe9ff;
+    opacity: 0.9;
+}
+
+/* === SUBTEXT === */
+.delete-subtext {
+    margin-top: 70px;
+    margin-bottom: 30px;
+    font-size: 1.4rem;
+    color: #cfe9ff;
+    opacity: 0.9;
+}
+
+.card-button {
+    margin-top: 0px;
+    margin-bottom: 20px;
+    font-size: 100rem;
+}
+
+/* === PLAYER GRID (FIX CENTERING ISSUE) === */
+.player-buttons {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+    justify-content: center;
+    gap: 15px;
+}
+
+/* === CLUB GRID === */
+.club-buttons {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(85px, 1fr));
+    justify-content: center;
+    column-gap: 15px;
+    row-gap: 30px;
+}
+
+.player-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;  
+    gap: 35px;
+    max-width: 420px;
+    margin: 0 auto;
+    margin-top: 70px;
+    margin-bottom: 0px;
+}
+
+/* === CARD CONTAINERS === */
+.player-container,
+.club-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+/* === DEFAULT BUTTON STYLE === */
+button {
+    width: 50%;
+
+    padding: 14px;
+    margin-top: 15px;
+    margin-bottom: 50px;
+
+    font-size: 1.2rem;
+    font-weight: 650;
+
+    border-radius: 50px; 
+
+    cursor: pointer;
+}
+
+/* === BUTTON BASE === */
+.player,
+.club,
+.icon {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    background: var(--card);
+    border: 1px solid rgba(58,160,255,0.4);
+
+    box-shadow: 
+        0 0 10px rgba(58,160,255,0.3),
+        0 0 20px rgba(122,92,255,0.15);
+
+    transition: all 0.2s ease;
+}
+
+/* === TAP FEEDBACK === */
+.player:active,
+.club:active,
+.icon:active {
+    transform: scale(0.9);
+}
+
+/* === HOVER (desktop only) === */
+@media (hover: hover) {
+    .player:hover,
+    .club:hover,
+    .icon:hover {
+        transform: scale(1.1);
+        box-shadow: 
+            0 0 15px var(--blue),
+            0 0 25px var(--purple);
+    }
+}
+
+/* === TEXT INSIDE BUTTONS === */
+.player span,
+.club span {
+    font-size: 1.7rem;
+    font-weight: bold;
+    color: var(--cyan);
+}
+
+/* === LABELS === */
+.label {
+    margin-top: 6px;
+    margin-bottom: 10px;
+    font-size: 0.9rem;
+    color: #cfe9ff;
+}
+
+.button-label {
+    margin-top: 6px;
+    font-size: 0.9rem;
+    color: #cfe9ff;
+}
+
+.wedge-label {
+    margin-top: 6px;
+    line-height: 15px;
+    font-size: 0.9rem;
+    color: #cfe9ff;
+}
+
+/* === BOTTOM BUTTONS === */
+.bottom-buttons {
+    display: flex;
+    justify-content: center;
+    margin-top: 90px;
+    gap: 25px;
+}
+
+/* === CLEAN ICON STYLE (NO EMOJIS) === */
+.icon {
+    font-size: 2.0rem;
+    font-weight: bold;
+    color: var(--cyan);
+}
+
+/* === BACK BUTTON === */
+.back-container {
+    margin-top: 75px;
+}
+
+.back-button {
+    padding: 10px 20px;
+    font-size: 0.9rem;
+    max-width: 150px;
+
+    background: var(--card);
+    border: 1px solid rgba(58,160,255,0.4);
+    color: var(--cyan);
+
+    border-radius: 8px;
+
+    box-shadow: 0 0 12px rgba(58,160,255,0.3);
+    transition: 0.2s;
+}
+
+.back-button:active {
+    transform: scale(0.95);
+}
+
+/* INPUT FIELD */
+input[type="text"] {
+    width: 100%;
+    max-width: 250px;
+
+    padding: 14px;
+    margin-top: 70px;
+    margin-bottom: 30px;
+
+    font-size: 1rem;
+
+    border-radius: 10px;
+    border: 1px solid rgba(58,160,255,0.4);
+
+    background: var(--card);
+    color: white;
+
+    outline: none;
+
+    box-shadow: 0 0 10px rgba(58,160,255,0.2);
+}
+
+input[type="text"]:focus {
+    box-shadow: 0 0 15px var(--cyan);
+}
+
+/* === ✨ NEXT LEVEL EFFECTS === */
+
+/* subtle fade-in */
+body {
+    animation: fadeIn 0.4s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes glowPulse {
+    0% { box-shadow: 0 0 5px var(--blue); }
+    50% { box-shadow: 0 0 20px var(--cyan); }
+    100% { box-shadow: 0 0 5px var(--blue); }
+}
+
+.player, .club {
+    animation: glowPulse 5.5s infinite;
+}
+
+/* === INTRO / TITLE SCREEN === */
+.intro-screen {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;  /* logo top, button bottom, titles center */
+    align-items: center;
+    text-align: center;
+    height: 100vh;
+    padding: 20px 20px;
+    box-sizing: border-box;
+}
+
+/* Container for top logos */
+.logo-top {
+    display: flex;
+    align-items: center;   /* vertically align logos */
+    gap: 5px;             /* space between logos */
+    margin-bottom: 0px;   /* space below logos */
+    margin-right: 15px;
+}
+
+/* BU Logo styling */
+.bu-logo {
+    width: 55px;   /* smaller than main logo */
+    margin-top: 0px;
+}
+
+/* Logo at the very top */
+.intro-logo {
+    width: 325px;  /* adjust as needed */
+    height: auto;
+    display: block;
+    margin-top: 0px;
+}
+
+/* Center container for titles and description */
+.intro-center {
+    flex-grow: 1;            /* take remaining space */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 15px;               /* small space between rows */
+}
+
+/* BIG TITLE */
+.intro-title {
+    font-size: 3.5rem;
+    letter-spacing: 2px;
+
+    color: var(--cyan);
+    text-shadow: 
+        0 0 10px var(--cyan),
+        0 0 30px var(--blue);
+
+    margin-top: 130px;
+    margin-bottom: 0px;   /* remove default margin */
+}
+
+/* SUBTITLE */
+.intro-subtitle {
+    font-size: 2.0rem;
+    color: #cfe9ff;
+    margin: 0;   /* remove default margin */
+}
+
+/* DESCRIPTION */
+.intro-description {
+    font-size: 0.9rem;
+    max-width: 500px;
+    width: 100%;
+    color: white;
+    line-height: 1.4;
+    margin: 0;    /* remove default margin */
+}
+
+/* START BUTTON at bottom */
+.start-button {
+    display: inline-block;
+    padding: 14px 40px;
+    font-size: 1.2rem;
+    font-weight: 650;
+    border-radius: 50px;
+    margin-bottom: 125px;
+
+    background: #0088ff;  /* default blue */
+    border: 1px solid white;
+    color: white;
+    text-align: center;
+
+    transition: 0.2s;
+}
+
+/* hover effect */
+@media (hover: hover) {
+    .start-button:hover {
+        transform: scale(1.08);
+        box-shadow: 
+            0 0 15px var(--blue),
+            0 0 25px var(--purple);
+    }
+}
+
+/* tap effect */
+.start-button:active {
+    transform: scale(0.95);
+}

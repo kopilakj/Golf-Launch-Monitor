@@ -163,8 +163,12 @@
         }
 
     </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=2">
 </head>
 <body>
+    <div class="main-container">
+        <h1 class="glow">{{ player_name }}</h1>
+        <h2 class="subtitle">{{ club }}</h2>
 
     <h1>{{ player_name }}</h1>
     <h2>{{ club }}</h2>
@@ -289,5 +293,19 @@
         }, 3000);
     </script>
 
+=======
+        <div class="metrics-container">
+            {% for key, value in metrics.items() %}
+            <div class="metric-card">
+                <div class="metric-title">{{ key.replace('_', ' ').title() }}</div>
+                <div class="metric-value">{{ value }}</div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <form action="{{ url_for('back_to_players') }}">
+            <button class="back-button">&#8592 BACK</button>
+        </form>
+    </div>
 </body>
 </html>
