@@ -146,6 +146,7 @@ class CircularBufferCapture:
         self.i2c_bus: Optional[SMBus] = None
         self.strobe_on_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x08])
         self.strobe_off_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x00])
+        self.strobe_armed = False
         
     def setup_camera(self) -> bool:
         """Initialize the camera for continuous capture."""
@@ -207,21 +208,43 @@ class CircularBufferCapture:
                 pass
             self.camera = None
     
+    def arm_strobe(self):
+        """Turn the IR strobe on. Called when system is armed for a swing.
+        Pre-trigger frames captured after this point will be illuminated."""
+        if not self.i2c_bus:
+            return
+        if self.strobe_armed:
+            return
+        try:
+            self.i2c_bus.i2c_rdwr(self.strobe_on_msg)
+            self.strobe_armed = True
+            print("[Capture] IR strobe ARMED (ON)")
+        except Exception as e:
+            print(f"[Capture] Failed to arm strobe: {e}")
+
+    def disarm_strobe(self):
+        """Turn the IR strobe off. Called after a shot is processed."""
+        if not self.i2c_bus:
+            return
+        if not self.strobe_armed:
+            return
+        try:
+            self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
+            self.strobe_armed = False
+            print("[Capture] IR strobe DISARMED (OFF)")
+        except Exception as e:
+            print(f"[Capture] Failed to disarm strobe: {e}")
+
     def capture_loop(self):
         """Main capture loop - runs continuously in background thread."""
         print("[Capture] Capture loop started")
-        
+
         while not self.stop_event.is_set():
             try:
-                # Capture frame with IR strobe
-                if self.i2c_bus:
-                    self.i2c_bus.i2c_rdwr(self.strobe_on_msg)
                 req = self.camera.capture_request()
                 meta = req.get_metadata()
                 raw = req.make_array("raw").copy()
                 req.release()
-                if self.i2c_bus:
-                    self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
 
                 timestamp_us = meta.get("SensorTimestamp", time.monotonic_ns() // 1000)
                 
@@ -256,18 +279,14 @@ class CircularBufferCapture:
         pre_count = len(self.captured_frames)
         print(f"[Capture] Saved {pre_count} pre-trigger frames")
         
-        # Capture post-trigger frames
+        # Capture post-trigger frames (strobe is already on from capture_loop startup)
         for i in range(POST_TRIGGER_FRAMES):
             try:
-                if self.i2c_bus:
-                    self.i2c_bus.i2c_rdwr(self.strobe_on_msg)
                 req = self.camera.capture_request()
                 meta = req.get_metadata()
                 raw = req.make_array("raw").copy()
                 req.release()
-                if self.i2c_bus:
-                    self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
-                
+
                 timestamp_us = meta.get("SensorTimestamp", time.monotonic_ns() // 1000)
                 
                 self.captured_frames.append(raw)
@@ -953,10 +972,15 @@ def handle_club_preset(conn: socket.socket, header: Dict[str, Any]) -> None:
     request_id = header["request_id"]
     
     print(f"[Sensor] Received CLUB_PRESET for {club_id}")
-    
+
     # Apply the preset
     state.apply_preset(club_id, preset_data, preset_version)
-    
+
+    # Arm the IR strobe — system is now ready for a swing.
+    # The circular buffer will roll over within ~100ms so by the time
+    # the trigger arrives, all pre-trigger frames will be illuminated.
+    capture_system.arm_strobe()
+
     # Send acknowledgment
     ack = make_ack_preset(club_id, preset_version, request_id)
     send_frame(conn, ack)
@@ -973,21 +997,30 @@ def handle_trigger(conn: socket.socket, header: Dict[str, Any]) -> None:
     print(f"[Sensor] Received TRIGGER:")
     print(f"         shot_id: {shot_id}")
     print(f"         club_id: {club_id}")
-    
+
+    # Defensive arm — in case no CLUB_PRESET was sent first.
+    # Pre-trigger frames already in the buffer may be dark in that case,
+    # but post-trigger frames will at least be illuminated.
+    capture_system.arm_strobe()
+
     # Send immediate acknowledgment
     ack = make_ack_trigger(shot_id, club_id, request_id)
     send_frame(conn, ack)
     print(f"[Sensor] Sent ACK_TRIGGER")
-    
+
     # Capture and process the shot
     try:
         csv_bytes = state.capture_shot(shot_id, club_id)
     except Exception as e:
         print(f"[Sensor] ERROR capturing shot: {e}")
+        capture_system.disarm_strobe()
         error_msg = make_error(f"Capture failed: {e}", request_id, shot_id)
         send_frame(conn, error_msg)
         return
-    
+
+    # Shot processed — disarm strobe to save power and reduce LED heat.
+    capture_system.disarm_strobe()
+
     # Send CSV data
     send_csv_data(conn, shot_id, club_id, csv_bytes, request_id)
 
