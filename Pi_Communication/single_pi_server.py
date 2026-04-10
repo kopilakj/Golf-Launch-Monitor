@@ -224,7 +224,7 @@ class CaptureSystem:
         _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
         changed_pixels = int(np.count_nonzero(diff_bin))
 
-        if changed_pixels > 50:  # DEBUG: remove this line after calibration
+        if changed_pixels > 0:  # DEBUG: remove this line after calibration
             print(f"[Motion] changed_pixels={changed_pixels}")
 
         if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
@@ -711,18 +711,23 @@ def _motion_process_shot():
 
         metrics = calculate_metrics(frames, meta)
 
-        try:
-            generate_debug_overlays(frames, meta, metrics, out_dir)
-        except Exception as e:
-            print(f"[Motion] Debug overlay error: {e}")
-
-        gui_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
+        # Build GUI metrics, converting numpy types to native Python
+        gui_metrics = {}
+        for k, v in metrics.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, (np.floating, np.integer)):
+                v = v.item()
+            gui_metrics[k] = v
         gui_metrics["shot_id"] = shot_id
         gui_metrics["club_id"] = current_club_preset
 
+        # Write JSON BEFORE debug overlays so the web page picks it up fast
         metrics_json_path = PROJECT_DIR / "WebApplication" / "latest_metrics.json"
         with open(metrics_json_path, "w") as f:
             json.dump(gui_metrics, f)
+
+        print(f"[Motion] Shot complete: {gui_metrics}")
 
         (out_dir / "metrics.csv").write_text(
             "metric,value,unit\n" +
@@ -731,7 +736,12 @@ def _motion_process_shot():
 
         shots_processed += 1
         capture_system.reset_motion()
-        print(f"[Motion] Shot complete: {gui_metrics}")
+
+        # Debug overlays last — slow but non-blocking for the web UI
+        try:
+            generate_debug_overlays(frames, meta, metrics, out_dir)
+        except Exception as e:
+            print(f"[Motion] Debug overlay error: {e}")
 
     except Exception as e:
         print(f"[Motion] Error processing shot: {e}")
