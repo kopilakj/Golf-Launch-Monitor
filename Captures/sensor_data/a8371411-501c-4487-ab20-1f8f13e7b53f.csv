@@ -1,9 +1,0 @@
-metric,value,unit
-ball_speed,0.5,mph
-launch_angle,4.4,degrees
-apex_height,0.0,feet
-carry_distance,0.0,yards
-frames_captured,45,
-club_id,7iron,
-shot_id,a8371411-501c-4487-ab20-1f8f13e7b53f,
-output_dir,/home/bottompi/Golf-Launch-Monitor/Captures/camera_captures/a8371411-501c-4487-ab20-1f8f13e7b53f_20260325_143946,
