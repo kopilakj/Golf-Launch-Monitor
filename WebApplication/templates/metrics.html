@@ -80,7 +80,6 @@
             background-color: #1a4a7a;
         }
 
-        /* Motion Detection Status */
         .motion-container {
             margin: 30px auto;
             padding: 25px;
@@ -134,13 +133,8 @@
             font-weight: bold;
         }
 
-        .motion-status-text.active {
-            color: #7ED957;
-        }
-
-        .motion-status-text.inactive {
-            color: #888;
-        }
+        .motion-status-text.active { color: #7ED957; }
+        .motion-status-text.inactive { color: #888; }
 
         .motion-hint {
             font-size: 14px;
@@ -158,75 +152,96 @@
             display: none;
         }
 
-        .waiting-message.visible {
-            display: block;
+        .waiting-message.visible { display: block; }
+
+        .new-shot-banner {
+            display: none;
+            margin: 20px auto;
+            padding: 15px 30px;
+            background-color: #7ED957;
+            color: #1a1a2e;
+            font-size: 20px;
+            font-weight: bold;
+            border-radius: 8px;
+            max-width: 500px;
         }
 
+        .new-shot-banner.visible { display: block; }
     </style>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=2">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=3">
 </head>
 <body>
     <div class="main-container">
         <h1 class="glow">{{ player_name }}</h1>
         <h2 class="subtitle">{{ club }}</h2>
 
-    <h1>{{ player_name }}</h1>
-    <h2>{{ club }}</h2>
-
-    <!-- Motion Detection Status -->
-    <div class="motion-container">
-        <div class="motion-title">Swing Detection</div>
-        <div class="motion-status-display">
-            <div class="motion-indicator inactive" id="motionIndicator"></div>
-            <span class="motion-status-text inactive" id="motionStatusText">INACTIVE</span>
-        </div>
-        <p class="motion-hint" id="motionHint">Swing detection will start automatically</p>
-        <div class="waiting-message" id="waitingMessage">
-            Ready to capture... Take your swing!
-        </div>
-    </div>
-
-    <div class="metrics-container">
-        {% for key, value in metrics.items() %}
-            {% if key not in ['club_id', 'shot_id', 'output_dir', 'frames_captured', 'error'] %}
-            <div class="metric-card">
-                <div class="metric-title">
-                    {{ key.replace('_', ' ').title() }}
-                </div>
-                <div class="metric-value">
-                    {{ value }}
-                </div>
-                <div class="metric-unit">
-                    {% if key == 'ball_speed' %}mph{% endif %}
-                    {% if key == 'launch_angle' %}degrees{% endif %}
-                    {% if key == 'apex_height' %}feet{% endif %}
-                    {% if key == 'carry_distance' %}yards{% endif %}
-                </div>
+        <!-- Motion Detection Status -->
+        <div class="motion-container">
+            <div class="motion-title">Swing Detection</div>
+            <div class="motion-status-display">
+                <div class="motion-indicator inactive" id="motionIndicator"></div>
+                <span class="motion-status-text inactive" id="motionStatusText">INACTIVE</span>
             </div>
-            {% endif %}
-        {% endfor %}
-    </div>
+            <p class="motion-hint" id="motionHint">Swing detection will start automatically</p>
+            <div class="waiting-message" id="waitingMessage">
+                Ready to capture... Take your swing!
+            </div>
+        </div>
 
-    <div class="button-container">
-        <a href="{{ url_for('select_club') }}">
-            <button class="nav-btn">Change Club</button>
-        </a>
-        <a href="{{ url_for('back_to_players') }}">
-            <button class="nav-btn">Back to Players</button>
-        </a>
+        <!-- Banner shown when a new shot arrives -->
+        <div class="new-shot-banner" id="newShotBanner">New shot received!</div>
+
+        <!-- Metrics cards (updated dynamically via JS) -->
+        <div class="metrics-container" id="metricsContainer">
+            {% if metrics %}
+                {% for key, value in metrics.items() %}
+                    {% if key not in ['club_id', 'shot_id', 'output_dir', 'frames_captured', 'frames_analyzed', 'detections', 'error'] %}
+                    <div class="metric-card">
+                        <div class="metric-title">{{ key.replace('_', ' ').title() }}</div>
+                        <div class="metric-value">{{ value }}</div>
+                        <div class="metric-unit">
+                            {% if key == 'ball_speed' %}mph{% endif %}
+                            {% if key == 'launch_angle' %}degrees{% endif %}
+                            {% if key == 'apex_height' %}feet{% endif %}
+                            {% if key == 'carry_distance' %}yards{% endif %}
+                        </div>
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            {% else %}
+                <p id="noMetrics" style="grid-column: 1 / -1; color: #aaa; font-size: 18px;">
+                    No metrics yet. Waiting for a swing...
+                </p>
+            {% endif %}
+        </div>
+
+        <div class="button-container">
+            <a href="{{ url_for('select_club') }}">
+                <button class="nav-btn">Change Club</button>
+            </a>
+            <a href="{{ url_for('back_to_players') }}">
+                <button class="nav-btn">Back to Players</button>
+            </a>
+        </div>
     </div>
 
     <script>
-        let motionEnabled = false;
-        
+        const UNIT_MAP = {
+            'ball_speed': 'mph',
+            'launch_angle': 'degrees',
+            'apex_height': 'feet',
+            'carry_distance': 'yards'
+        };
+        const SKIP_KEYS = ['club_id', 'shot_id', 'output_dir', 'frames_captured',
+                           'frames_analyzed', 'detections', 'error'];
+        let lastShotId = '{{ metrics.shot_id if metrics and metrics.shot_id else "" }}';
+
         function updateMotionUI(enabled) {
             const indicator = document.getElementById('motionIndicator');
             const statusText = document.getElementById('motionStatusText');
             const hint = document.getElementById('motionHint');
             const waitingMsg = document.getElementById('waitingMessage');
-            
-            motionEnabled = enabled;
-            
+
             if (enabled) {
                 indicator.className = 'motion-indicator active';
                 statusText.textContent = 'ACTIVE';
@@ -241,71 +256,82 @@
                 waitingMsg.className = 'waiting-message';
             }
         }
-        
+
         function enableMotion() {
             fetch('/api/motion/enable', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'}
             })
-            .then(response => response.json())
+            .then(r => r.json())
             .then(data => {
-                if (data.motion_enabled !== undefined) {
-                    updateMotionUI(data.motion_enabled);
-                } else if (data.success) {
-                    updateMotionUI(true);
-                }
+                updateMotionUI(data.motion_enabled || data.success);
             })
-            .catch(err => {
-                console.log('Could not enable motion:', err);
-                // Retry after a delay
-                setTimeout(enableMotion, 3000);
-            });
+            .catch(() => setTimeout(enableMotion, 3000));
         }
-        
+
         function checkMotionStatus() {
             fetch('/api/motion/status')
-            .then(response => response.json())
+            .then(r => r.json())
             .then(data => {
-                if (data.motion_enabled !== undefined) {
-                    updateMotionUI(data.motion_enabled);
-                    // If not enabled, try to enable it
-                    if (!data.motion_enabled) {
-                        enableMotion();
-                    }
+                updateMotionUI(!!data.motion_enabled);
+                if (!data.motion_enabled) enableMotion();
+            })
+            .catch(() => setTimeout(enableMotion, 2000));
+        }
+
+        function renderMetrics(metrics) {
+            const container = document.getElementById('metricsContainer');
+            container.innerHTML = '';
+
+            for (const [key, value] of Object.entries(metrics)) {
+                if (SKIP_KEYS.includes(key)) continue;
+
+                const card = document.createElement('div');
+                card.className = 'metric-card';
+
+                const title = document.createElement('div');
+                title.className = 'metric-title';
+                title.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                card.appendChild(title);
+
+                const val = document.createElement('div');
+                val.className = 'metric-value';
+                val.textContent = value;
+                card.appendChild(val);
+
+                if (UNIT_MAP[key]) {
+                    const unit = document.createElement('div');
+                    unit.className = 'metric-unit';
+                    unit.textContent = UNIT_MAP[key];
+                    card.appendChild(unit);
+                }
+
+                container.appendChild(card);
+            }
+
+            // Flash the banner briefly
+            const banner = document.getElementById('newShotBanner');
+            banner.className = 'new-shot-banner visible';
+            setTimeout(() => { banner.className = 'new-shot-banner'; }, 4000);
+        }
+
+        // Poll for new metrics every 3 seconds WITHOUT reloading the page.
+        // Metrics stay visible until a new shot replaces them.
+        function pollForMetrics() {
+            fetch('/api/latest_metrics')
+            .then(r => r.json())
+            .then(data => {
+                if (data && data.shot_id && data.shot_id !== lastShotId) {
+                    lastShotId = data.shot_id;
+                    renderMetrics(data);
                 }
             })
-            .catch(err => {
-                console.log('Could not check motion status:', err);
-                // Try to enable anyway
-                setTimeout(enableMotion, 2000);
-            });
+            .catch(() => {});
         }
-        
-        // Auto-enable motion detection on page load
+
+        // Start
         checkMotionStatus();
-        
-        // Auto-refresh every 3 seconds when motion detection is enabled
-        // This will catch new shots automatically
-        setInterval(() => {
-            if (motionEnabled) {
-                location.reload();
-            }
-        }, 3000);
+        setInterval(pollForMetrics, 3000);
     </script>
-
-=======
-        <div class="metrics-container">
-            {% for key, value in metrics.items() %}
-            <div class="metric-card">
-                <div class="metric-title">{{ key.replace('_', ' ').title() }}</div>
-                <div class="metric-value">{{ value }}</div>
-            </div>
-            {% endfor %}
-        </div>
-
-        <form action="{{ url_for('back_to_players') }}">
-            <button class="back-button">&#8592 BACK</button>
-        </form>
-    </div>
 </body>
 </html>

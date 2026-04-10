@@ -65,7 +65,7 @@ BUFFER_SIZE = PRE_TRIGGER_FRAMES + 10
 # Motion detection
 MOTION_ROI = (210, 270, 160, 40)
 MOTION_PIXEL_DIFF_THRESH = 10
-MOTION_CHANGED_PIXELS_THRESH = 400
+MOTION_CHANGED_PIXELS_THRESH = 300
 MOTION_MIN_CONSECUTIVE = 2
 MOTION_WARMUP_SEC = 1.0
 MOTION_COOLDOWN_SEC = 2.0
@@ -224,13 +224,16 @@ class CaptureSystem:
         _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
         changed_pixels = int(np.count_nonzero(diff_bin))
 
-        if changed_pixels > 0:  # DEBUG: remove this line after calibration
-            print(f"[Motion] changed_pixels={changed_pixels}")
-
         if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
             self.consecutive_motion += 1
         else:
             self.consecutive_motion = 0
+
+        # Log every 300th frame (~1 per second at 300fps) so you can see
+        # what changed_pixels values look like and tune the threshold.
+        self.motion_frame_count = getattr(self, 'motion_frame_count', 0) + 1
+        if self.motion_frame_count % 300 == 0:
+            print(f"[Motion] changed_pixels={changed_pixels}  thresh={MOTION_CHANGED_PIXELS_THRESH}  consecutive={self.consecutive_motion}")
 
         self.prev_roi_frame = roi_frame.copy()
         return self.consecutive_motion >= MOTION_MIN_CONSECUTIVE
@@ -871,6 +874,7 @@ def display_metrics():
                                 (player_id,)).fetchone()
     connection.close()
 
+    # Load latest metrics if available (don't clear — the JS poll reads them)
     metrics = None
     metrics_path = PROJECT_DIR / "WebApplication" / "latest_metrics.json"
     if metrics_path.exists():
@@ -882,19 +886,7 @@ def display_metrics():
         except (json.JSONDecodeError, ValueError):
             metrics = None
 
-    if not metrics:
-        return (
-            '<html><head><meta http-equiv="refresh" content="2">'
-            '<style>body{font-family:sans-serif;display:flex;justify-content:center;'
-            'align-items:center;height:100vh;margin:0;background:#1a1a1a;color:#fff;}'
-            '</style></head><body>'
-            '<h1>Waiting for swing...</h1>'
-            '</body></html>'
-        )
-
-    with open(metrics_path, "w") as f:
-        f.write("")
-
+    # Always render the page — JS will poll for new metrics in the background
     return render_template("metrics.html", player_name=player["name"],
                            club=club, metrics=metrics)
 
@@ -972,6 +964,21 @@ def api_upload_metrics():
     with open(metrics_path, "w") as f:
         json.dump(data, f)
     return jsonify({"status": "success"})
+
+
+@app.route("/api/latest_metrics", methods=["GET"])
+def api_latest_metrics():
+    """Return latest metrics as JSON (polled by the metrics page JS)."""
+    metrics_path = PROJECT_DIR / "WebApplication" / "latest_metrics.json"
+    if metrics_path.exists():
+        try:
+            with open(metrics_path, "r") as f:
+                content = f.read().strip()
+                if content:
+                    return jsonify(json.loads(content))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return jsonify({})
 
 
 @app.route("/api/trigger_shot", methods=["POST"])
