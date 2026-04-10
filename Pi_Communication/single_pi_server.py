@@ -224,14 +224,6 @@ class CaptureSystem:
         _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
         changed_pixels = int(np.count_nonzero(diff_bin))
 
-        if changed_pixels > 0:  # DEBUG: remove this line after calibration
-            print(f"[Motion] changed_pixels={changed_pixels}")
-
-        if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
-            self.consecutive_motion += 1
-        else:
-            self.consecutive_motion = 0
-
         self.prev_roi_frame = roi_frame.copy()
         return self.consecutive_motion >= MOTION_MIN_CONSECUTIVE
 
@@ -884,7 +876,7 @@ def display_metrics():
 
     if not metrics:
         return (
-            '<html><head><meta http-equiv="refresh" content="2">'
+            '<html><head><meta http-equiv="refresh" content="15">'
             '<style>body{font-family:sans-serif;display:flex;justify-content:center;'
             'align-items:center;height:100vh;margin:0;background:#1a1a1a;color:#fff;}'
             '</style></head><body>'
