@@ -224,6 +224,9 @@ class CaptureSystem:
         _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
         changed_pixels = int(np.count_nonzero(diff_bin))
 
+        if changed_pixels > 50:  # DEBUG: remove this line after calibration
+            print(f"[Motion] changed_pixels={changed_pixels}")
+
         if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
             self.consecutive_motion += 1
         else:
