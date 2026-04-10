@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECD612 Golf Monitor</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=6">
+</head>
+
+<body>
+    <div class="main-container intro-screen">
+
+        <!-- Top logos container -->
+        <div class="logo-top">
+            <!-- BU Logo (smaller) -->
+            <img 
+                src="{{ url_for('static', filename='bu_logo.png') }}" 
+                alt="BU Logo"
+                class="bu-logo"
+            >
+
+            <!-- Main Logo -->
+            <img 
+                src="{{ url_for('static', filename='binghamton.png') }}" 
+                alt="Binghamton University Logo"
+                class="intro-logo"
+            >
+        </div>
+
+        <!-- CENTER TITLES -->
+        <div class="intro-center">
+            <h1 class="intro-title">ECD612</h1>
+            <div class="intro-subtitle">Golf Launch Monitor</div>
+            <div class="intro-description">
+                A portable golf launch monitor designed to track swing performance using image capture technology
+            </div>
+        </div>
+
+        <!-- START BUTTON at bottom -->
+        <a href="{{ url_for('whos_playing') }}" class="start-button">
+            START
+        </a>
+
+    </div>
+</body>
+</html>

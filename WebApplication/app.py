@@ -1,4 +1,5 @@
 from flask import Flask, redirect, url_for, render_template, session, request, flash, jsonify
+import requests
 import sqlite3
 import os
 import json
@@ -88,6 +89,9 @@ initialize_db()
 
 ## Define Routes
 @app.route("/")
+def start():
+    return render_template("start_page.html")
+
 @app.route("/whos_playing")
 def whos_playing():
     connection = sqlite3.connect("player.db")
@@ -132,7 +136,14 @@ def select_gameplay_club(club):
     if not bridge_success:
         print(f"[App] Warning: Could not notify bridge about club {club}")
         # Continue anyway - user can still see metrics page
-    
+
+    requests.post(
+        "http://172.20.10.2:5001/set_club",
+        json = {"club": club}
+    )
+
+    print("Club Selection Saved: ", club)
+
     return redirect(url_for("display_metrics"))
 
 @app.route("/back_to_players")
@@ -201,7 +212,7 @@ def delete_player(player_id):
         if session.get("player") == player_id:
             session.pop("player")
 
-        return redirect(url_for("delete_users"))
+        return redirect(url_for("whos_playing"))
     
     player=connection.execute("SELECT * FROM player WHERE id = ?",
                               (player_id,)).fetchone()
@@ -335,11 +346,19 @@ def display_metrics():
     ).fetchone()
     connection.close()
 
-    if not os.path.exists("latest_metrics.json"):
+    metrics = None
+    if os.path.exists("latest_metrics.json"):
+        try:
+            with open("latest_metrics.json", "r") as f:
+                metrics = json.load(f)
+        except json.JSONDecodeError:
+            metrics = None
+
+    if not metrics:
         return "<h1>No metrics received yet. Waiting for player to swing...</h1>"
 
-    with open("latest_metrics.json", "r") as f:
-        metrics = json.load(f)
+    with open("latest_metrics.json", "w") as f:
+        f.write("")
 
     return render_template(
         "metrics.html",
@@ -350,4 +369,4 @@ def display_metrics():
 
 ## Run Flask
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
