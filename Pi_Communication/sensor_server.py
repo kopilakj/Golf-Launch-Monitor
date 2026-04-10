@@ -23,7 +23,7 @@ import time
 import csv as csv_module
 from pathlib import Path
 from datetime import datetime
-from threading import Thread, Lock, Event
+from threading import Thread, Lock, Event, Timer
 from collections import deque
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -147,7 +147,9 @@ class CircularBufferCapture:
         self.strobe_on_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x08])
         self.strobe_off_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x00])
         self.strobe_armed = False
-        
+        self.strobe_timeout_s = 20
+        self.strobe_timer: Optional[Timer] = None
+
     def setup_camera(self) -> bool:
         """Initialize the camera for continuous capture."""
         try:
@@ -208,22 +210,45 @@ class CircularBufferCapture:
                 pass
             self.camera = None
     
+    def _cancel_strobe_timer(self):
+        """Cancel any pending auto-disarm timer."""
+        if self.strobe_timer is not None:
+            self.strobe_timer.cancel()
+            self.strobe_timer = None
+
+    def _start_strobe_timer(self):
+        """Start (or restart) the auto-disarm timer."""
+        self._cancel_strobe_timer()
+        self.strobe_timer = Timer(self.strobe_timeout_s, self._auto_disarm)
+        self.strobe_timer.daemon = True
+        self.strobe_timer.start()
+
+    def _auto_disarm(self):
+        """Called by the timer when no swing happens within the timeout."""
+        print(f"[Capture] No swing detected within {self.strobe_timeout_s}s — auto-disarming strobe")
+        self.disarm_strobe()
+
     def arm_strobe(self):
         """Turn the IR strobe on. Called when system is armed for a swing.
-        Pre-trigger frames captured after this point will be illuminated."""
+        Pre-trigger frames captured after this point will be illuminated.
+        Auto-disarms after strobe_timeout_s seconds if no trigger arrives."""
         if not self.i2c_bus:
             return
         if self.strobe_armed:
+            # Already on — just reset the timeout timer
+            self._start_strobe_timer()
             return
         try:
             self.i2c_bus.i2c_rdwr(self.strobe_on_msg)
             self.strobe_armed = True
-            print("[Capture] IR strobe ARMED (ON)")
+            self._start_strobe_timer()
+            print("[Capture] IR strobe ARMED (ON) — auto-disarm in %ds" % self.strobe_timeout_s)
         except Exception as e:
             print(f"[Capture] Failed to arm strobe: {e}")
 
     def disarm_strobe(self):
         """Turn the IR strobe off. Called after a shot is processed."""
+        self._cancel_strobe_timer()
         if not self.i2c_bus:
             return
         if not self.strobe_armed:
