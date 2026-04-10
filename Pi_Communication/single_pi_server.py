@@ -837,7 +837,10 @@ def select_gameplay_club(club):
     session["club"] = club
     current_club_gui = club
     current_club_preset = normalize_club_name(club)
-    print(f"[App] Club selected: {club} -> {current_club_preset}")
+
+    # Auto-enable motion detection when a club is selected
+    capture_system.enable_motion()
+    print(f"[App] Club selected: {club} -> {current_club_preset}, motion detection enabled")
 
     return redirect(url_for("display_metrics"))
 
@@ -867,7 +870,14 @@ def display_metrics():
             metrics = None
 
     if not metrics:
-        return "<h1>No metrics received yet. Waiting for player to swing...</h1>"
+        return (
+            '<html><head><meta http-equiv="refresh" content="2">'
+            '<style>body{font-family:sans-serif;display:flex;justify-content:center;'
+            'align-items:center;height:100vh;margin:0;background:#1a1a1a;color:#fff;}'
+            '</style></head><body>'
+            '<h1>Waiting for swing...</h1>'
+            '</body></html>'
+        )
 
     with open(metrics_path, "w") as f:
         f.write("")
