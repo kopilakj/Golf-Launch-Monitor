@@ -583,8 +583,18 @@ def calculate_metrics(frames, meta):
     else:
         launch_angle_deg = 12.0
 
+    # Reject negative launch angles — ball must go up
+    if launch_angle_deg <= 0:
+        print(f"[Metrics] Negative launch angle ({launch_angle_deg:.1f}), defaulting to 12.0")
+        launch_angle_deg = 12.0
+
     print(f"[Metrics] Launch angle: {launch_angle_deg:.1f} degrees")
     apex_height_ft, carry_distance_yds = simulate_trajectory(velocity_mps, launch_angle_deg)
+
+    # Apex height must be positive — recalculate with default angle if needed
+    if apex_height_ft <= 0:
+        print(f"[Metrics] Apex height was 0, recalculating with 12.0 deg fallback")
+        apex_height_ft, carry_distance_yds = simulate_trajectory(velocity_mps, 12.0)
 
     return {
         "ball_speed": round(ball_speed_mph, 1),
