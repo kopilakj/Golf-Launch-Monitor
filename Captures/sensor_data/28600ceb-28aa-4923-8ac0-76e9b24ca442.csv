@@ -1,0 +1,6 @@
+metric,value,unit
+error,Could not detect ball at rest,
+frames_captured,45,
+club_id,7iron,
+shot_id,28600ceb-28aa-4923-8ac0-76e9b24ca442,
+output_dir,/home/bottompi/Golf-Launch-Monitor/Captures/camera_captures/28600ceb-28aa-4923-8ac0-76e9b24ca442_20260325_144523,

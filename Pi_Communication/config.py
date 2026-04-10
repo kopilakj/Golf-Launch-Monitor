@@ -98,7 +98,7 @@ MOTION_ANALOGUE_GAIN = 4.0
 MOTION_BUFFER_COUNT = 4
 
 # Region of Interest for motion detection (x, y, width, height)
-MOTION_ROI = (210, 250, 160, 50)
+MOTION_ROI = (210, 260, 160, 45)
 
 # Motion detection thresholds
 MOTION_PIXEL_DIFF_THRESH = 10      # Pixel intensity difference to count as changed

@@ -1,1 +1,1 @@
-{"error": "Could not detect ball at rest", "frames_captured": 45, "output_dir": "/home/bottompi/Golf-Launch-Monitor/Captures/camera_captures/8f6d12dd-e427-4565-ad8d-9a29510f6b1c_20260323_151218"}
+{"ball_speed": 1.9, "launch_angle": 36.9, "apex_height": 0, "carry_distance": 0.1, "frames_captured": 45, "output_dir": "/home/bottompi/Golf-Launch-Monitor/Captures/camera_captures/6e60b29c-9269-4564-be9f-eeb53316a6d0_20260325_172643"}
