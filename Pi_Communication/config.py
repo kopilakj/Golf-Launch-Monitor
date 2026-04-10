@@ -93,7 +93,7 @@ CAPTURE_DURATION_MS = 500  # Default capture duration in milliseconds
 # Camera settings for motion detection
 MOTION_CAMERA_SIZE = (640, 400)
 MOTION_TARGET_FPS = 300
-MOTION_EXPOSURE_US = 994
+MOTION_EXPOSURE_US = 500
 MOTION_ANALOGUE_GAIN = 4.0
 MOTION_BUFFER_COUNT = 4
 
