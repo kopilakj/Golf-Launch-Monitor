@@ -45,6 +45,11 @@ MSG_CSV_DONE = "CSV_DONE"           # Sensor -> Main (transfer complete)
 # Results
 MSG_SHOT_RESULT = "SHOT_RESULT"     # Main -> GUI (via Flask)
 
+# Strobe control
+MSG_STROBE_ARM = "STROBE_ARM"       # Main -> Sensor (turn strobe on)
+MSG_STROBE_DISARM = "STROBE_DISARM" # Main -> Sensor (turn strobe off)
+MSG_ACK_STROBE = "ACK_STROBE"       # Sensor -> Main
+
 # Utility
 MSG_ERROR = "ERROR"                 # Any direction (error response)
 MSG_PING = "PING"                   # Health check
@@ -288,6 +293,27 @@ def make_error(
         header["shot_id"] = shot_id
     if error_code:
         header["error_code"] = error_code
+    return header
+
+
+# =============================================================================
+# STROBE CONTROL MESSAGES
+# =============================================================================
+
+def make_strobe_arm(request_id: Optional[str] = None) -> Dict[str, Any]:
+    """Create STROBE_ARM message (Main -> Sensor). Turn strobe on."""
+    return base_header(MSG_STROBE_ARM, request_id)
+
+
+def make_strobe_disarm(request_id: Optional[str] = None) -> Dict[str, Any]:
+    """Create STROBE_DISARM message (Main -> Sensor). Turn strobe off."""
+    return base_header(MSG_STROBE_DISARM, request_id)
+
+
+def make_ack_strobe(armed: bool, request_id: str) -> Dict[str, Any]:
+    """Create ACK_STROBE message (Sensor -> Main)."""
+    header = base_header(MSG_ACK_STROBE, request_id)
+    header["strobe_armed"] = armed
     return header
 
 

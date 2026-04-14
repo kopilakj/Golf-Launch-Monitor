@@ -86,7 +86,9 @@ from protocol import (
 from messages import (
     MSG_CLUB_PRESET, MSG_ACK_PRESET, MSG_TRIGGER, MSG_ACK_TRIGGER,
     MSG_CSV_META, MSG_CSV_CHUNK, MSG_CSV_DONE, MSG_PING, MSG_PONG, MSG_ERROR,
+    MSG_STROBE_ARM, MSG_STROBE_DISARM, MSG_ACK_STROBE,
     make_club_preset, make_trigger, make_ping,
+    make_strobe_arm, make_strobe_disarm,
     new_shot_id, new_request_id, get_preset_version
 )
 
@@ -296,6 +298,7 @@ class MotionDetector:
             return
 
         result = self.detect_ball_at_rest(frame)
+        prev_state = self.ball_state
 
         if result:
             self.ball_position = (result[0], result[1])
@@ -304,6 +307,8 @@ class MotionDetector:
             if self.ball_state == "waiting":
                 self.ball_state = "stabilizing"
                 print(f"[Ball] Detected at ({result[0]}, {result[1]}) — stabilizing...")
+                # Arm strobe as soon as ball is detected
+                self._send_strobe_arm()
 
             if self.ball_consecutive >= self.ball_ready_count and self.ball_state != "ready":
                 self.ball_state = "ready"
@@ -311,6 +316,8 @@ class MotionDetector:
         else:
             if self.ball_state != "waiting":
                 print(f"[Ball] Lost — back to waiting (was {self.ball_state})")
+                # Disarm strobe when ball is lost
+                self._send_strobe_disarm()
             self.ball_state = "waiting"
             self.ball_consecutive = 0
             self.ball_position = None
@@ -318,6 +325,37 @@ class MotionDetector:
         # Update shared state for API
         state.ball_state = self.ball_state
         state.ball_position = self.ball_position
+
+    def _send_strobe_arm(self):
+        """Tell bottom Pi to turn strobe on."""
+        if not sensor.connected:
+            return
+        try:
+            msg = make_strobe_arm()
+            sensor.send(msg)
+            # Read ACK but don't block the detection loop
+            header, _ = sensor.recv()
+            if header and header.get("msg_type") == MSG_ACK_STROBE:
+                print("[Bridge] Strobe armed on Sensor Pi")
+            else:
+                print("[Bridge] Strobe arm — no ACK received")
+        except Exception as e:
+            print(f"[Bridge] Strobe arm failed: {e}")
+
+    def _send_strobe_disarm(self):
+        """Tell bottom Pi to turn strobe off."""
+        if not sensor.connected:
+            return
+        try:
+            msg = make_strobe_disarm()
+            sensor.send(msg)
+            header, _ = sensor.recv()
+            if header and header.get("msg_type") == MSG_ACK_STROBE:
+                print("[Bridge] Strobe disarmed on Sensor Pi")
+            else:
+                print("[Bridge] Strobe disarm — no ACK received")
+        except Exception as e:
+            print(f"[Bridge] Strobe disarm failed: {e}")
 
     # ---- Motion (swing) detection ----
 
@@ -383,6 +421,8 @@ class MotionDetector:
 
         finally:
             self.trigger_lock.release()
+            # Disarm strobe after shot, then reset to wait for next ball
+            self._send_strobe_disarm()
             self.reset_detection()
 
     # ---- Main loop ----

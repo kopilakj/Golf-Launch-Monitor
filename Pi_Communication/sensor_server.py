@@ -48,8 +48,9 @@ from protocol import (
 from messages import (
     MSG_CLUB_PRESET, MSG_ACK_PRESET, MSG_TRIGGER, MSG_ACK_TRIGGER,
     MSG_CSV_META, MSG_CSV_CHUNK, MSG_CSV_DONE, MSG_PING, MSG_ERROR,
+    MSG_STROBE_ARM, MSG_STROBE_DISARM, MSG_ACK_STROBE,
     make_ack_preset, make_ack_trigger, make_csv_meta, make_csv_chunk,
-    make_csv_done, make_error, make_pong
+    make_csv_done, make_error, make_pong, make_ack_strobe
 )
 
 
@@ -1001,10 +1002,8 @@ def handle_club_preset(conn: socket.socket, header: Dict[str, Any]) -> None:
     # Apply the preset
     state.apply_preset(club_id, preset_data, preset_version)
 
-    # Arm the IR strobe — system is now ready for a swing.
-    # The circular buffer will roll over within ~100ms so by the time
-    # the trigger arrives, all pre-trigger frames will be illuminated.
-    capture_system.arm_strobe()
+    # Strobe is now armed/disarmed by STROBE_ARM/STROBE_DISARM messages
+    # from the bridge, tied to ball-at-rest detection on the top Pi.
 
     # Send acknowledgment
     ack = make_ack_preset(club_id, preset_version, request_id)
@@ -1107,6 +1106,22 @@ def send_csv_data(
     print(f"[Sensor] Sent CSV_DONE")
 
 
+def handle_strobe_arm(conn: socket.socket, header: Dict[str, Any]) -> None:
+    """Handle STROBE_ARM — turn on IR strobe."""
+    capture_system.arm_strobe()
+    ack = make_ack_strobe(True, header["request_id"])
+    send_frame(conn, ack)
+    print("[Sensor] Strobe armed via remote command")
+
+
+def handle_strobe_disarm(conn: socket.socket, header: Dict[str, Any]) -> None:
+    """Handle STROBE_DISARM — turn off IR strobe."""
+    capture_system.disarm_strobe()
+    ack = make_ack_strobe(False, header["request_id"])
+    send_frame(conn, ack)
+    print("[Sensor] Strobe disarmed via remote command")
+
+
 def handle_ping(conn: socket.socket, header: Dict[str, Any]) -> None:
     """Handle PING health check."""
     pong = make_pong(header["request_id"])
@@ -1147,9 +1162,15 @@ def handle_client(conn: socket.socket, addr: tuple) -> None:
                 validate_shot_header(header)
                 handle_trigger(conn, header)
             
+            elif msg_type == MSG_STROBE_ARM:
+                handle_strobe_arm(conn, header)
+
+            elif msg_type == MSG_STROBE_DISARM:
+                handle_strobe_disarm(conn, header)
+
             elif msg_type == MSG_PING:
                 handle_ping(conn, header)
-            
+
             else:
                 print(f"[Sensor] Unknown message type: {msg_type}")
                 error_msg = make_error(
