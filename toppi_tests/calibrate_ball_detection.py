@@ -56,15 +56,6 @@ BRIGHTNESS_THRESHOLD = 65
 MIN_BALL_AREA_REST = 40
 MAX_BALL_AREA_REST = 500
 MIN_CIRCULARITY_REST = 0.4
-# Ball rest position — center of MOTION_ROI
-BALL_REST_X = MOTION_ROI[0] + MOTION_ROI[2] // 2   # 290
-BALL_REST_Y = MOTION_ROI[1] + MOTION_ROI[3] // 2   # 290
-
-# Search radius covers the entire MOTION_ROI from its center
-_roi_half_w = MOTION_ROI[2] / 2
-_roi_half_h = MOTION_ROI[3] / 2
-REST_SEARCH_RADIUS = int(np.ceil(np.sqrt(_roi_half_w**2 + _roi_half_h**2))) + 5  # ~88
-ROI_REST_HALF = REST_SEARCH_RADIUS + 5
 
 # Output directory
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -132,35 +123,28 @@ def get_contour_features(contour, gray_frame=None):
 
 def analyze_frame(gray, brightness_threshold):
     """
-    Run ball-at-rest detection with full diagnostics.
+    Run ball-at-rest detection within the MOTION_ROI only.
     Returns (best_candidate, all_contour_info).
     """
-    target_x = BALL_REST_X
-    target_y = BALL_REST_Y
-
-    # Build the ROI mask (same logic as single_pi_server.py)
-    gray_roi = np.zeros_like(gray)
-    x1 = max(0, target_x - ROI_REST_HALF)
-    y1 = max(0, target_y - ROI_REST_HALF)
-    x2 = min(gray.shape[1], target_x + ROI_REST_HALF)
-    y2 = min(gray.shape[0], target_y + ROI_REST_HALF)
-    gray_roi[y1:y2, x1:x2] = gray[y1:y2, x1:x2]
+    rx, ry, rw, rh = MOTION_ROI
+    roi_crop = gray[ry:ry + rh, rx:rx + rw]
 
     best_candidate = None
     best_score = -1
-    all_contours = []  # list of dicts with features + rejection reason
+    all_contours = []
 
     thresholds = [brightness_threshold - 15, brightness_threshold, brightness_threshold + 15]
     thresholds = [t for t in thresholds if 10 <= t <= 240]
 
     for thresh_val in thresholds:
-        _, thresh_img = cv2.threshold(gray_roi, thresh_val, 255, cv2.THRESH_BINARY)
+        _, thresh_img = cv2.threshold(roi_crop, thresh_val, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(thresh_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for contour in contours:
-            features = get_contour_features(contour, gray)
-            dist = np.sqrt((features['cx'] - target_x) ** 2 +
-                           (features['cy'] - target_y) ** 2)
+            features = get_contour_features(contour, roi_crop)
+            # Convert ROI-local coords to full-frame coords
+            full_cx = features['cx'] + rx
+            full_cy = features['cy'] + ry
 
             rejection = None
             if features['area'] <= MIN_BALL_AREA_REST:
@@ -169,20 +153,19 @@ def analyze_frame(gray, brightness_threshold):
                 rejection = f"area too large ({features['area']:.0f} >= {MAX_BALL_AREA_REST})"
             elif features['circularity'] < MIN_CIRCULARITY_REST:
                 rejection = f"not circular ({features['circularity']:.2f} < {MIN_CIRCULARITY_REST})"
-            elif dist > REST_SEARCH_RADIUS:
-                rejection = f"too far from target ({dist:.0f}px > {REST_SEARCH_RADIUS}px)"
 
             info = {
                 **features,
+                'cx': full_cx, 'cy': full_cy,
                 'thresh_val': thresh_val,
-                'dist_to_target': dist,
                 'rejection': rejection,
                 'contour': contour,
+                'contour_offset': (rx, ry),  # for drawing on full frame
             }
             all_contours.append(info)
 
             if rejection is None:
-                score = 100 - dist + features['circularity'] * 50
+                score = features['circularity'] * 100 + features['area']
                 if score > best_score:
                     best_score = score
                     best_candidate = info
@@ -203,39 +186,28 @@ def draw_debug_image(gray, best_candidate, all_contours, brightness_threshold):
         scale = min(255.0 / max_val, 5.0)
         display = np.clip(debug.astype(np.float32) * scale, 0, 255).astype(np.uint8)
 
-    # --- Draw MOTION_ROI (cyan) ---
+    # --- Draw MOTION_ROI (cyan) — this IS the search area ---
     rx, ry, rw, rh = MOTION_ROI
     cv2.rectangle(display, (rx, ry), (rx + rw, ry + rh), (255, 255, 0), 2)
-    cv2.putText(display, "MOTION ROI", (rx, ry - 5),
+    cv2.putText(display, "MOTION ROI (search area)", (rx, ry - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-
-    # --- Draw ball-rest search area (green) ---
-    sr_x1 = max(0, BALL_REST_X - ROI_REST_HALF)
-    sr_y1 = max(0, BALL_REST_Y - ROI_REST_HALF)
-    sr_x2 = min(CAPTURE_WIDTH, BALL_REST_X + ROI_REST_HALF)
-    sr_y2 = min(CAPTURE_HEIGHT, BALL_REST_Y + ROI_REST_HALF)
-    cv2.rectangle(display, (sr_x1, sr_y1), (sr_x2, sr_y2), (0, 255, 0), 2)
-    cv2.putText(display, "REST SEARCH", (sr_x1, sr_y1 - 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-    # --- Draw rest search radius circle (green, dashed feel via thin line) ---
-    cv2.circle(display, (BALL_REST_X, BALL_REST_Y), REST_SEARCH_RADIUS, (0, 255, 0), 1)
-    # Crosshair at target center
-    cv2.drawMarker(display, (BALL_REST_X, BALL_REST_Y), (0, 255, 0),
-                   cv2.MARKER_CROSS, 15, 1)
 
     # --- Draw all rejected contours (red) with labels ---
     for info in all_contours:
         if info.get('rejection') and info is not best_candidate:
-            cv2.drawContours(display, [info['contour']], 0, (0, 0, 255), 1)
+            ox, oy = info.get('contour_offset', (0, 0))
+            shifted = info['contour'] + np.array([ox, oy])
+            cv2.drawContours(display, [shifted], 0, (0, 0, 255), 1)
             label = f"A={info['area']:.0f} C={info['circularity']:.2f}"
             cv2.putText(display, label,
-                        (info['bbox'][0], info['bbox'][1] - 3),
+                        (info['bbox'][0] + ox, info['bbox'][1] + oy - 3),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
 
     # --- Draw accepted candidate (bright green, thick) ---
     if best_candidate:
-        cv2.drawContours(display, [best_candidate['contour']], 0, (0, 255, 0), 2)
+        ox, oy = best_candidate.get('contour_offset', (0, 0))
+        shifted = best_candidate['contour'] + np.array([ox, oy])
+        cv2.drawContours(display, [shifted], 0, (0, 255, 0), 2)
         cx, cy = best_candidate['cx'], best_candidate['cy']
         cv2.circle(display, (cx, cy), 5, (0, 255, 0), -1)
         label = (f"BALL ({cx},{cy}) A={best_candidate['area']:.0f} "
@@ -247,7 +219,7 @@ def draw_debug_image(gray, best_candidate, all_contours, brightness_threshold):
     panel_lines = [
         f"Brightness thresh: {brightness_threshold} (tries {brightness_threshold-15}, {brightness_threshold}, {brightness_threshold+15})",
         f"Frame stats: min={gray.min()} max={gray.max()} mean={gray.mean():.1f}",
-        f"BALL_REST target: ({BALL_REST_X}, {BALL_REST_Y})  search_radius={REST_SEARCH_RADIUS}  roi_half={ROI_REST_HALF}",
+        f"MOTION_ROI: x={rx} y={ry} w={rw} h={rh}",
         f"Area filter: {MIN_BALL_AREA_REST} - {MAX_BALL_AREA_REST}  |  Min circularity: {MIN_CIRCULARITY_REST}",
         f"Contours found: {len(all_contours)}  |  Accepted: {'YES' if best_candidate else 'NO'}",
     ]
@@ -260,25 +232,20 @@ def draw_debug_image(gray, best_candidate, all_contours, brightness_threshold):
 
 def print_report(gray, best_candidate, all_contours, brightness_threshold):
     """Print a text summary to the terminal."""
+    rx, ry, rw, rh = MOTION_ROI
     print("=" * 65)
     print("  BALL-AT-REST CALIBRATION REPORT")
     print("=" * 65)
     print(f"  Frame size:        {gray.shape[1]} x {gray.shape[0]}")
     print(f"  Pixel stats:       min={gray.min()}  max={gray.max()}  mean={gray.mean():.1f}")
     print(f"  Brightness thresh: {brightness_threshold}")
-    print(f"  Target position:   ({BALL_REST_X}, {BALL_REST_Y})")
-    print(f"  Search radius:     {REST_SEARCH_RADIUS}px")
-    print(f"  ROI half-size:     {ROI_REST_HALF}px")
+    print(f"  MOTION_ROI:        x={rx} y={ry} w={rw} h={rh}")
     print(f"  Area range:        {MIN_BALL_AREA_REST} - {MAX_BALL_AREA_REST}")
     print(f"  Min circularity:   {MIN_CIRCULARITY_REST}")
     print()
 
     # ROI pixel stats
-    x1 = max(0, BALL_REST_X - ROI_REST_HALF)
-    y1 = max(0, BALL_REST_Y - ROI_REST_HALF)
-    x2 = min(gray.shape[1], BALL_REST_X + ROI_REST_HALF)
-    y2 = min(gray.shape[0], BALL_REST_Y + ROI_REST_HALF)
-    roi_pixels = gray[y1:y2, x1:x2]
+    roi_pixels = gray[ry:ry + rh, rx:rx + rw]
     print(f"  ROI pixel stats:   min={roi_pixels.min()}  max={roi_pixels.max()}  mean={roi_pixels.mean():.1f}")
 
     if roi_pixels.max() < brightness_threshold - 15:
@@ -297,14 +264,12 @@ def print_report(gray, best_candidate, all_contours, brightness_threshold):
     else:
         print(f"  Total contours found: {len(all_contours)}")
         print()
-        # Show up to 10 contours sorted by area
         sorted_c = sorted(all_contours, key=lambda c: c['area'], reverse=True)
         for i, c in enumerate(sorted_c[:10]):
             status = "ACCEPTED" if c is best_candidate else f"REJECTED: {c['rejection']}"
             print(f"  [{i+1}] pos=({c['cx']},{c['cy']}) area={c['area']:.0f} "
                   f"circ={c['circularity']:.2f} bright={c['brightness']:.0f} "
-                  f"dist={c['dist_to_target']:.0f}px thresh={c['thresh_val']} "
-                  f"-> {status}")
+                  f"thresh={c['thresh_val']} -> {status}")
 
     print()
     if best_candidate:

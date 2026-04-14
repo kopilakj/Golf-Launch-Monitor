@@ -96,18 +96,7 @@ MIN_BALL_AREA_FLIGHT = 15
 MAX_BALL_AREA_FLIGHT = 400
 MIN_CIRCULARITY_REST = 0.4
 MIN_CIRCULARITY_FLIGHT = 0.35
-# Ball rest position = center of MOTION_ROI
-BALL_REST_X = MOTION_ROI[0] + MOTION_ROI[2] // 2   # 290
-BALL_REST_Y = MOTION_ROI[1] + MOTION_ROI[3] // 2   # 290
-
-# Search radius covers the entire MOTION_ROI from its center
-# (half-diagonal of the ROI rectangle, rounded up)
-_roi_half_w = MOTION_ROI[2] / 2
-_roi_half_h = MOTION_ROI[3] / 2
-REST_SEARCH_RADIUS = int(np.ceil(np.sqrt(_roi_half_w**2 + _roi_half_h**2))) + 5  # ~88
-
-# ROI mask half-size — must be at least as large as REST_SEARCH_RADIUS
-ROI_REST_HALF = REST_SEARCH_RADIUS + 5
+# Ball rest detection uses MOTION_ROI directly — no separate search area
 ROI_FLIGHT_HALF = 40
 ROI_GROWTH_PER_MISS = 10
 ROI_MAX_HALF = 80
@@ -411,33 +400,35 @@ def apply_roi_box(gray, cx, cy, half):
     return masked
 
 
-def detect_ball_at_rest(frame, hint=None):
+def detect_ball_at_rest(frame):
+    """Search for a ball at rest inside the MOTION_ROI rectangle."""
     gray = frame if len(frame.shape) == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    target_x = hint[0] if hint else BALL_REST_X
-    target_y = hint[1] if hint else BALL_REST_Y
-    gray_roi = apply_roi_box(gray, target_x, target_y, ROI_REST_HALF)
+    rx, ry, rw, rh = MOTION_ROI
+
+    # Crop to MOTION_ROI only
+    roi_crop = gray[ry:ry + rh, rx:rx + rw]
 
     best_candidate = None
     best_score = -1
 
     for thresh_val in [BRIGHTNESS_THRESHOLD, BRIGHTNESS_THRESHOLD - 15, BRIGHTNESS_THRESHOLD + 15]:
-        if thresh_val < 40 or thresh_val > 200:
+        if thresh_val < 10 or thresh_val > 240:
             continue
-        _, thresh = cv2.threshold(gray_roi, thresh_val, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(roi_crop, thresh_val, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
-            features = get_contour_features(contour, gray)
+            features = get_contour_features(contour, roi_crop)
             if not (MIN_BALL_AREA_REST < features['area'] < MAX_BALL_AREA_REST):
                 continue
             if features['circularity'] < MIN_CIRCULARITY_REST:
                 continue
-            dist = np.sqrt((features['cx'] - target_x) ** 2 + (features['cy'] - target_y) ** 2)
-            if dist > REST_SEARCH_RADIUS:
-                continue
-            score = 100 - dist + features['circularity'] * 50
+            # Convert ROI-local coords back to full-frame coords
+            full_cx = features['cx'] + rx
+            full_cy = features['cy'] + ry
+            score = features['circularity'] * 100 + features['area']
             if score > best_score:
                 best_score = score
-                best_candidate = (features['cx'], features['cy'], features['area'])
+                best_candidate = (full_cx, full_cy, features['area'])
 
     return best_candidate
 
@@ -516,7 +507,7 @@ def calculate_metrics(frames, meta):
 
     for i in range(trigger_idx, len(frames)):
         if not ball_departed:
-            rest_check = detect_ball_at_rest(frames[i], hint=rest_position)
+            rest_check = detect_ball_at_rest(frames[i])
             if rest_check:
                 dist = np.sqrt((rest_check[0] - rest_position[0]) ** 2 +
                                (rest_check[1] - rest_position[1]) ** 2)
