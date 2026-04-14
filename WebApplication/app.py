@@ -324,6 +324,7 @@ def api_motion_status():
         return jsonify({
             "motion_enabled": False,
             "camera_available": False,
+            "ball_state": "waiting",
             "error": "Bridge not running"
         }), 503
     except Exception as e:

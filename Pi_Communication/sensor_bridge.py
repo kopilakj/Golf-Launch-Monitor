@@ -74,6 +74,9 @@ from config import (
     MOTION_ANALOGUE_GAIN, MOTION_BUFFER_COUNT,
     MOTION_ROI, MOTION_PIXEL_DIFF_THRESH, MOTION_CHANGED_PIXELS_THRESH,
     MOTION_MIN_CONSECUTIVE, MOTION_WARMUP_SEC,
+    # Ball-at-rest detection settings
+    BALL_BRIGHTNESS_THRESHOLD, BALL_MIN_AREA_REST, BALL_MAX_AREA_REST,
+    BALL_MIN_CIRCULARITY, BALL_CHECK_INTERVAL, BALL_READY_SECONDS,
 )
 from protocol import (
     send_frame, recv_frame, validate_header, validate_shot_header,
@@ -110,6 +113,10 @@ class BridgeState:
         # Motion detection state
         self.motion_enabled: bool = False
         self.motion_detecting: bool = False
+
+        # Ball-at-rest state
+        self.ball_state: str = "waiting"  # "waiting", "stabilizing", "ready"
+        self.ball_position: Optional[Tuple[int, int]] = None
     
     def set_club(self, gui_name: str, preset_name: str, version: int):
         with self.lock:
@@ -145,65 +152,80 @@ state = BridgeState()
 
 class MotionDetector:
     """
-    Detects motion in camera frames using ROI-based frame differencing.
-    Runs in a background thread and triggers shots when motion is detected.
+    Detects ball at rest + swing motion using the top Pi camera.
+
+    State machine:
+      "waiting"     -> Ball not found. Checking every BALL_CHECK_INTERVAL frames.
+      "stabilizing" -> Ball found, counting consecutive detections.
+      "ready"       -> Ball confirmed at rest. Motion detection armed.
+
+    Swing detection only triggers when ball_state == "ready".
+    After a swing, state resets to "waiting".
     """
-    
+
     def __init__(self):
         self.camera = None
         self.running = False
-        self.enabled = Event()  # Thread-safe enable/disable
+        self.enabled = Event()
         self.stop_event = Event()
         self.thread: Optional[Thread] = None
-        
-        # Detection state
+
+        # Motion detection state
         self.prev_roi_frame = None
         self.consecutive_motion: int = 0
         self.warmup_start: float = 0
         self.is_warmed_up: bool = False
-        
+
+        # Ball-at-rest state
+        self.ball_state: str = "waiting"
+        self.ball_consecutive: int = 0
+        self.ball_position: Optional[Tuple[int, int]] = None
+        self.ball_frame_counter: int = 0
+        self.ball_ready_count: int = int(
+            BALL_READY_SECONDS / (BALL_CHECK_INTERVAL / MOTION_TARGET_FPS)
+        )
+
         # Cooldown to prevent double-triggers
         self.last_trigger_time: float = 0
         self.trigger_cooldown_sec: float = 2.0
-        
+
         # Trigger lock to prevent concurrent triggers
         self.trigger_lock = Lock()
-    
+
     def setup_camera(self) -> bool:
         """Initialize the camera for motion detection."""
         if not CAMERA_AVAILABLE:
             print("[Motion] Camera libraries not available")
             return False
-        
+
         try:
             print("[Motion] Setting up camera...")
             self.camera = Picamera2()
-            
+
             config = self.camera.create_video_configuration(
                 raw={"size": MOTION_CAMERA_SIZE, "format": "R8"},
                 buffer_count=MOTION_BUFFER_COUNT,
             )
             self.camera.configure(config)
             self.camera.start()
-            time.sleep(0.5)  # Let camera stabilize
-            
-            # Set camera controls
+            time.sleep(0.5)
+
             frame_us = int(1_000_000 / MOTION_TARGET_FPS)
             self.camera.set_controls({
                 "FrameDurationLimits": (frame_us, frame_us),
                 "ExposureTime": MOTION_EXPOSURE_US,
                 "AnalogueGain": MOTION_ANALOGUE_GAIN,
             })
-            
+
             print(f"[Motion] Camera ready: {MOTION_CAMERA_SIZE} @ {MOTION_TARGET_FPS}fps")
-            print(f"[Motion] ROI: {MOTION_ROI}")
+            print(f"[Motion] Exposure: {MOTION_EXPOSURE_US}us  ROI: {MOTION_ROI}")
             return True
-            
+
         except Exception as e:
             print(f"[Motion] Camera setup failed: {e}")
             traceback.print_exc()
             return False
-    
+
     def cleanup_camera(self):
         """Stop and close the camera."""
         if self.camera:
@@ -212,147 +234,214 @@ class MotionDetector:
             except:
                 pass
             self.camera = None
-    
+
     def reset_detection(self):
-        """Reset detection state for next shot."""
+        """Reset all detection state for next shot."""
         self.prev_roi_frame = None
         self.consecutive_motion = 0
         self.warmup_start = time.time()
         self.is_warmed_up = False
-    
+        self.ball_state = "waiting"
+        self.ball_consecutive = 0
+        self.ball_position = None
+        self.ball_frame_counter = 0
+        state.ball_state = "waiting"
+        state.ball_position = None
+
+    # ---- Ball-at-rest detection ----
+
+    @staticmethod
+    def detect_ball_at_rest(frame) -> Optional[Tuple[int, int, int]]:
+        """Search for a ball at rest inside the MOTION_ROI rectangle."""
+        gray = frame if len(frame.shape) == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        rx, ry, rw, rh = MOTION_ROI
+        roi_crop = gray[ry:ry + rh, rx:rx + rw]
+
+        best_candidate = None
+        best_score = -1
+
+        for thresh_val in [BALL_BRIGHTNESS_THRESHOLD,
+                           BALL_BRIGHTNESS_THRESHOLD - 15,
+                           BALL_BRIGHTNESS_THRESHOLD + 15]:
+            if thresh_val < 10 or thresh_val > 240:
+                continue
+            _, thresh = cv2.threshold(roi_crop, thresh_val, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if not (BALL_MIN_AREA_REST < area < BALL_MAX_AREA_REST):
+                    continue
+                perimeter = cv2.arcLength(contour, True)
+                circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0
+                if circularity < BALL_MIN_CIRCULARITY:
+                    continue
+                M = cv2.moments(contour)
+                if M['m00'] > 0:
+                    cx = int(M['m10'] / M['m00']) + rx
+                    cy = int(M['m01'] / M['m00']) + ry
+                else:
+                    continue
+                score = circularity * 100 + area
+                if score > best_score:
+                    best_score = score
+                    best_candidate = (cx, cy, int(area))
+
+        return best_candidate
+
+    def check_ball_at_rest(self, frame):
+        """Run ball-at-rest detection periodically. Updates ball_state."""
+        self.ball_frame_counter += 1
+        if self.ball_frame_counter % BALL_CHECK_INTERVAL != 0:
+            return
+
+        result = self.detect_ball_at_rest(frame)
+
+        if result:
+            self.ball_position = (result[0], result[1])
+            self.ball_consecutive += 1
+
+            if self.ball_state == "waiting":
+                self.ball_state = "stabilizing"
+                print(f"[Ball] Detected at ({result[0]}, {result[1]}) — stabilizing...")
+
+            if self.ball_consecutive >= self.ball_ready_count and self.ball_state != "ready":
+                self.ball_state = "ready"
+                print(f"[Ball] ======= READY FOR SWING =======")
+        else:
+            if self.ball_state != "waiting":
+                print(f"[Ball] Lost — back to waiting (was {self.ball_state})")
+            self.ball_state = "waiting"
+            self.ball_consecutive = 0
+            self.ball_position = None
+
+        # Update shared state for API
+        state.ball_state = self.ball_state
+        state.ball_position = self.ball_position
+
+    # ---- Motion (swing) detection ----
+
     def check_frame(self, frame) -> Tuple[bool, int]:
         """
-        Check a frame for motion.
-        
-        Returns:
-            Tuple of (triggered: bool, changed_pixels: int)
+        Check a frame for swing motion.
+        Returns (triggered, changed_pixels).
         """
         rx, ry, rw, rh = MOTION_ROI
         roi_frame = frame[ry:ry+rh, rx:rx+rw]
-        
-        # Warmup period
+
         if not self.is_warmed_up:
             if time.time() - self.warmup_start < MOTION_WARMUP_SEC:
                 self.prev_roi_frame = roi_frame.copy()
                 return False, 0
             else:
                 self.is_warmed_up = True
-                print("[Motion] Warmup complete, detecting motion...")
-        
-        # Need previous frame to compare
+                print("[Motion] Warmup complete")
+
         if self.prev_roi_frame is None:
             self.prev_roi_frame = roi_frame.copy()
             return False, 0
-        
-        # Calculate frame difference
+
         diff = cv2.absdiff(roi_frame, self.prev_roi_frame)
         _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
         changed_pixels = int(np.count_nonzero(diff_bin))
-        
-        # Check if enough pixels changed
+
         if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
             self.consecutive_motion += 1
         else:
             self.consecutive_motion = 0
-        
-        # Store current frame for next comparison
+
         self.prev_roi_frame = roi_frame.copy()
-        
-        # Trigger if enough consecutive frames with motion
-        triggered = self.consecutive_motion >= MOTION_MIN_CONSECUTIVE
-        
-        return triggered, changed_pixels
-    
+
+        return self.consecutive_motion >= MOTION_MIN_CONSECUTIVE, changed_pixels
+
     def on_motion_detected(self, changed_pixels: int):
-        """Called when motion is detected - triggers shot capture."""
-        # Check cooldown
+        """Called when swing is detected - triggers shot on bottom Pi."""
         now = time.time()
         if now - self.last_trigger_time < self.trigger_cooldown_sec:
             print(f"[Motion] Cooldown active, ignoring trigger")
             return
-        
-        # Use lock to prevent concurrent triggers
+
         if not self.trigger_lock.acquire(blocking=False):
             print(f"[Motion] Trigger already in progress, ignoring")
             return
-        
+
         try:
             self.last_trigger_time = now
-            
+
             print(f"[Motion] ========================================")
             print(f"[Motion] SWING DETECTED! (changed={changed_pixels})")
-            print(f"[Motion] Triggering shot...")
+            print(f"[Motion] Triggering shot on Sensor Pi...")
             print(f"[Motion] ========================================")
-            
-            # Trigger shot (uses the existing trigger_shot function)
+
             result = trigger_shot()
-            
+
             if result.get("success"):
                 print(f"[Motion] Shot captured successfully!")
                 print(f"[Motion] Shot ID: {result.get('shot_id')}")
             else:
                 print(f"[Motion] Shot capture failed: {result.get('error')}")
-        
+
         finally:
             self.trigger_lock.release()
-            # Reset detection after trigger
             self.reset_detection()
-    
+
+    # ---- Main loop ----
+
     def detection_loop(self):
         """Main detection loop - runs in background thread."""
         print("[Motion] Detection thread started")
-        
+
         while not self.stop_event.is_set():
-            # Wait until enabled
             if not self.enabled.is_set():
                 time.sleep(0.1)
                 continue
-            
-            # Make sure camera is set up
+
             if self.camera is None:
                 if not self.setup_camera():
-                    print("[Motion] Camera setup failed, disabling motion detection")
+                    print("[Motion] Camera setup failed, disabling")
                     self.enabled.clear()
                     state.motion_enabled = False
                     continue
                 self.reset_detection()
-            
+
             try:
-                # Capture and check frame
                 req = self.camera.capture_request()
                 raw = req.make_array("raw")
                 req.release()
-                
-                triggered, changed = self.check_frame(raw)
-                
-                if triggered:
-                    self.on_motion_detected(changed)
-                    
+
+                # Always check ball state
+                self.check_ball_at_rest(raw)
+
+                # Only check for swings when ball is confirmed at rest
+                if self.ball_state == "ready":
+                    triggered, changed = self.check_frame(raw)
+                    if triggered:
+                        self.on_motion_detected(changed)
+
             except Exception as e:
                 print(f"[Motion] Error in detection loop: {e}")
                 time.sleep(0.1)
-        
-        # Cleanup on exit
+
         self.cleanup_camera()
         print("[Motion] Detection thread stopped")
-    
+
     def start(self) -> bool:
         """Start the motion detection background thread."""
         if not CAMERA_AVAILABLE:
             print("[Motion] Cannot start - camera libraries not available")
             return False
-        
+
         if self.thread and self.thread.is_alive():
             print("[Motion] Already running")
             return True
-        
+
         self.stop_event.clear()
         self.thread = Thread(target=self.detection_loop, daemon=True)
         self.thread.start()
         self.running = True
         print("[Motion] Background thread started")
         return True
-    
+
     def stop(self):
         """Stop the motion detection thread."""
         self.stop_event.set()
@@ -361,31 +450,33 @@ class MotionDetector:
             self.thread.join(timeout=2.0)
         self.running = False
         print("[Motion] Stopped")
-    
+
     def enable(self) -> bool:
         """Enable motion detection."""
         if not CAMERA_AVAILABLE:
             print("[Motion] Cannot enable - camera libraries not available")
             return False
-        
+
         if not self.running:
             self.start()
-        
+
         self.enabled.set()
         state.motion_enabled = True
         state.motion_detecting = True
-        print("[Motion] Enabled - watching for swings")
+        print("[Motion] Enabled — watching for ball + swings")
         return True
-    
+
     def disable(self):
-        """Disable motion detection (keeps thread running but not detecting)."""
+        """Disable motion detection (keeps thread running)."""
         self.enabled.clear()
         state.motion_enabled = False
         state.motion_detecting = False
+        self.ball_state = "waiting"
+        state.ball_state = "waiting"
+        state.ball_position = None
         print("[Motion] Disabled")
-    
+
     def is_enabled(self) -> bool:
-        """Check if motion detection is enabled."""
         return self.enabled.is_set()
 
 
@@ -843,7 +934,9 @@ def get_status():
         # Motion detection status
         "camera_available": CAMERA_AVAILABLE,
         "motion_enabled": motion_detector.is_enabled() if CAMERA_AVAILABLE else False,
-        "motion_thread_running": motion_detector.running if CAMERA_AVAILABLE else False
+        "motion_thread_running": motion_detector.running if CAMERA_AVAILABLE else False,
+        "ball_state": state.ball_state,
+        "ball_position": state.ball_position
     })
 
 
@@ -975,11 +1068,13 @@ def motion_disable():
 
 @app.route("/motion/status", methods=["GET"])
 def motion_status():
-    """Get motion detection status."""
+    """Get motion detection status including ball-at-rest state."""
     return jsonify({
         "camera_available": CAMERA_AVAILABLE,
         "motion_enabled": motion_detector.is_enabled(),
         "thread_running": motion_detector.running,
+        "ball_state": state.ball_state,
+        "ball_position": state.ball_position,
         "shots_triggered": state.shots_triggered,
         "shots_received": state.shots_received
     })

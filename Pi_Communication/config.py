@@ -93,20 +93,28 @@ CAPTURE_DURATION_MS = 500  # Default capture duration in milliseconds
 # Camera settings for motion detection
 MOTION_CAMERA_SIZE = (640, 400)
 MOTION_TARGET_FPS = 300
-MOTION_EXPOSURE_US = 500
+MOTION_EXPOSURE_US = 2000           # Higher exposure for reliable ball detection (top Pi only)
 MOTION_ANALOGUE_GAIN = 4.0
 MOTION_BUFFER_COUNT = 4
 
 # Region of Interest for motion detection (x, y, width, height)
-MOTION_ROI = (210, 260, 160, 45)
+MOTION_ROI = (210, 270, 160, 40)
 
 # Motion detection thresholds
 MOTION_PIXEL_DIFF_THRESH = 10      # Pixel intensity difference to count as changed
-MOTION_CHANGED_PIXELS_THRESH = 500  # Number of changed pixels to trigger
+MOTION_CHANGED_PIXELS_THRESH = 300  # Number of changed pixels to trigger
 MOTION_MIN_CONSECUTIVE = 2          # Consecutive frames with motion to trigger
 
 # Timing
 MOTION_WARMUP_SEC = 1.0  # Seconds to wait before detecting motion
+
+# Ball-at-rest detection
+BALL_BRIGHTNESS_THRESHOLD = 65      # Brightness threshold for ball detection
+BALL_MIN_AREA_REST = 40             # Minimum contour area
+BALL_MAX_AREA_REST = 500            # Maximum contour area
+BALL_MIN_CIRCULARITY = 0.4          # Minimum circularity
+BALL_CHECK_INTERVAL = 30            # Check every N frames (~10x/sec at 300fps)
+BALL_READY_SECONDS = 2.0            # Seconds of consecutive detections before "ready"
 
 # =============================================================================
 # CLUB NAME MAPPING (GUI names -> internal preset names)
