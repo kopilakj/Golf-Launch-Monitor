@@ -70,6 +70,12 @@ MOTION_MIN_CONSECUTIVE = 2
 MOTION_WARMUP_SEC = 1.0
 MOTION_COOLDOWN_SEC = 2.0
 
+# Ball-at-rest verification
+# Check ball detection every N frames (saves CPU vs every frame)
+BALL_CHECK_INTERVAL = 30          # every ~0.1s at 300fps
+# Consecutive detections needed before "ready" (~2 seconds)
+BALL_READY_COUNT = int(2.0 / (BALL_CHECK_INTERVAL / TARGET_FPS))  # ~20
+
 # Metric calculation — camera calibration
 CAMERA_DISTANCE_M = 0.965
 HORIZONTAL_FOV_DEG = 70.0
@@ -157,6 +163,13 @@ class CaptureSystem:
         self.is_warmed_up = False
         self.last_trigger_time = 0.0
 
+        # Ball-at-rest state machine
+        # States: "waiting" -> "stabilizing" -> "ready"
+        self.ball_state = "waiting"       # current state
+        self.ball_consecutive = 0         # consecutive detections
+        self.ball_position = None         # last detected (x, y)
+        self.ball_frame_counter = 0       # counts frames for check interval
+
     def setup_camera(self) -> bool:
         try:
             print("[Capture] Setting up camera...")
@@ -197,6 +210,36 @@ class CaptureSystem:
         self.consecutive_motion = 0
         self.warmup_start = time.time()
         self.is_warmed_up = False
+        self.ball_state = "waiting"
+        self.ball_consecutive = 0
+        self.ball_position = None
+        self.ball_frame_counter = 0
+
+    def check_ball_at_rest(self, frame: np.ndarray):
+        """Run ball-at-rest detection periodically. Updates ball_state."""
+        self.ball_frame_counter += 1
+        if self.ball_frame_counter % BALL_CHECK_INTERVAL != 0:
+            return
+
+        result = detect_ball_at_rest(frame)
+
+        if result:
+            self.ball_position = (result[0], result[1])
+            self.ball_consecutive += 1
+
+            if self.ball_state == "waiting":
+                self.ball_state = "stabilizing"
+                print(f"[Ball] Detected at ({result[0]}, {result[1]}) — stabilizing...")
+
+            if self.ball_consecutive >= BALL_READY_COUNT and self.ball_state != "ready":
+                self.ball_state = "ready"
+                print(f"[Ball] ======= READY FOR SWING =======")
+        else:
+            if self.ball_state != "waiting":
+                print(f"[Ball] Lost — back to waiting (was {self.ball_state})")
+            self.ball_state = "waiting"
+            self.ball_consecutive = 0
+            self.ball_position = None
 
     def check_motion(self, frame: np.ndarray) -> bool:
         rx, ry, rw, rh = MOTION_ROI
@@ -261,16 +304,22 @@ class CaptureSystem:
                         "frame_time": time.time()
                     })
 
-                # Motion detection
+                # Ball-at-rest + motion detection
                 if (self.motion_enabled.is_set()
                         and not self.trigger_event.is_set()
                         and time.time() - self.last_trigger_time > MOTION_COOLDOWN_SEC):
-                    if self.check_motion(raw):
-                        print("[Motion] ========================================")
-                        print("[Motion] SWING DETECTED!")
-                        print("[Motion] ========================================")
-                        self.last_trigger_time = time.time()
-                        self.trigger_event.set()
+
+                    # Always check ball state
+                    self.check_ball_at_rest(raw)
+
+                    # Only look for swings when ball is confirmed at rest
+                    if self.ball_state == "ready":
+                        if self.check_motion(raw):
+                            print("[Motion] ========================================")
+                            print("[Motion] SWING DETECTED!")
+                            print("[Motion] ========================================")
+                            self.last_trigger_time = time.time()
+                            self.trigger_event.set()
 
                 # Handle trigger
                 if self.trigger_event.is_set():
@@ -1010,6 +1059,8 @@ def api_motion_status():
     return jsonify({
         "motion_enabled": capture_system.motion_enabled.is_set(),
         "camera_running": capture_system.running,
+        "ball_state": capture_system.ball_state,
+        "ball_position": capture_system.ball_position,
     })
 
 

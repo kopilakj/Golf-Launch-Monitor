@@ -109,22 +109,31 @@
             width: 20px;
             height: 20px;
             border-radius: 50%;
-            animation: pulse 2s infinite;
-        }
-
-        .motion-indicator.active {
-            background-color: #7ED957;
-            box-shadow: 0 0 20px #7ED957;
         }
 
         .motion-indicator.inactive {
             background-color: #666;
+        }
+
+        .motion-indicator.waiting {
+            background-color: #ff6b35;
+            animation: pulse 1.5s infinite;
+        }
+
+        .motion-indicator.stabilizing {
+            background-color: #ffd700;
+            animation: pulse 1s infinite;
+        }
+
+        .motion-indicator.ready {
+            background-color: #7ED957;
+            box-shadow: 0 0 20px #7ED957;
             animation: none;
         }
 
         @keyframes pulse {
             0% { opacity: 1; }
-            50% { opacity: 0.5; }
+            50% { opacity: 0.4; }
             100% { opacity: 1; }
         }
 
@@ -133,26 +142,16 @@
             font-weight: bold;
         }
 
-        .motion-status-text.active { color: #7ED957; }
         .motion-status-text.inactive { color: #888; }
+        .motion-status-text.waiting { color: #ff6b35; }
+        .motion-status-text.stabilizing { color: #ffd700; }
+        .motion-status-text.ready { color: #7ED957; }
 
         .motion-hint {
             font-size: 14px;
             color: #aaa;
             margin-top: 10px;
         }
-
-        .waiting-message {
-            font-size: 18px;
-            color: #7ED957;
-            margin-top: 20px;
-            padding: 15px;
-            background-color: rgba(126, 217, 87, 0.1);
-            border-radius: 8px;
-            display: none;
-        }
-
-        .waiting-message.visible { display: block; }
 
         .new-shot-banner {
             display: none;
@@ -175,17 +174,14 @@
         <h1 class="glow">{{ player_name }}</h1>
         <h2 class="subtitle">{{ club }}</h2>
 
-        <!-- Motion Detection Status -->
+        <!-- System Status -->
         <div class="motion-container">
-            <div class="motion-title">Swing Detection</div>
+            <div class="motion-title">System Status</div>
             <div class="motion-status-display">
                 <div class="motion-indicator inactive" id="motionIndicator"></div>
-                <span class="motion-status-text inactive" id="motionStatusText">INACTIVE</span>
+                <span class="motion-status-text inactive" id="motionStatusText">STARTING...</span>
             </div>
-            <p class="motion-hint" id="motionHint">Swing detection will start automatically</p>
-            <div class="waiting-message" id="waitingMessage">
-                Ready to capture... Take your swing!
-            </div>
+            <p class="motion-hint" id="motionHint">Connecting to camera system...</p>
         </div>
 
         <!-- Banner shown when a new shot arrives -->
@@ -236,25 +232,48 @@
                            'frames_analyzed', 'detections', 'error'];
         let lastShotId = '{{ metrics.shot_id if metrics and metrics.shot_id else "" }}';
 
-        function updateMotionUI(enabled) {
+        const STATUS_CONFIG = {
+            inactive: {
+                indicator: 'motion-indicator inactive',
+                text: 'INACTIVE',
+                textClass: 'motion-status-text inactive',
+                hint: 'Connecting to camera system...'
+            },
+            waiting: {
+                indicator: 'motion-indicator waiting',
+                text: 'WAITING FOR BALL',
+                textClass: 'motion-status-text waiting',
+                hint: 'Place the ball in the hitting area'
+            },
+            stabilizing: {
+                indicator: 'motion-indicator stabilizing',
+                text: 'BALL DETECTED',
+                textClass: 'motion-status-text stabilizing',
+                hint: 'Hold still... confirming ball position'
+            },
+            ready: {
+                indicator: 'motion-indicator ready',
+                text: 'READY FOR SWING',
+                textClass: 'motion-status-text ready',
+                hint: 'Ball locked in — take your swing!'
+            }
+        };
+
+        function updateStatusUI(ballState, motionEnabled) {
             const indicator = document.getElementById('motionIndicator');
             const statusText = document.getElementById('motionStatusText');
             const hint = document.getElementById('motionHint');
-            const waitingMsg = document.getElementById('waitingMessage');
 
-            if (enabled) {
-                indicator.className = 'motion-indicator active';
-                statusText.textContent = 'ACTIVE';
-                statusText.className = 'motion-status-text active';
-                hint.textContent = 'Monitoring for swing motion...';
-                waitingMsg.className = 'waiting-message visible';
-            } else {
-                indicator.className = 'motion-indicator inactive';
-                statusText.textContent = 'INACTIVE';
-                statusText.className = 'motion-status-text inactive';
-                hint.textContent = 'Connecting to sensor system...';
-                waitingMsg.className = 'waiting-message';
+            let state = 'inactive';
+            if (motionEnabled) {
+                state = ballState || 'waiting';
             }
+
+            const cfg = STATUS_CONFIG[state] || STATUS_CONFIG.inactive;
+            indicator.className = cfg.indicator;
+            statusText.textContent = cfg.text;
+            statusText.className = cfg.textClass;
+            hint.textContent = cfg.hint;
         }
 
         function enableMotion() {
@@ -264,19 +283,22 @@
             })
             .then(r => r.json())
             .then(data => {
-                updateMotionUI(data.motion_enabled || data.success);
+                updateStatusUI(data.ball_state || 'waiting', data.motion_enabled || data.success);
             })
             .catch(() => setTimeout(enableMotion, 3000));
         }
 
-        function checkMotionStatus() {
+        function pollStatus() {
             fetch('/api/motion/status')
             .then(r => r.json())
             .then(data => {
-                updateMotionUI(!!data.motion_enabled);
-                if (!data.motion_enabled) enableMotion();
+                if (!data.motion_enabled) {
+                    enableMotion();
+                } else {
+                    updateStatusUI(data.ball_state, true);
+                }
             })
-            .catch(() => setTimeout(enableMotion, 2000));
+            .catch(() => {});
         }
 
         function renderMetrics(metrics) {
@@ -329,8 +351,9 @@
             .catch(() => {});
         }
 
-        // Start
-        checkMotionStatus();
+        // Start — enable motion, then poll status + metrics
+        enableMotion();
+        setInterval(pollStatus, 1000);
         setInterval(pollForMetrics, 3000);
     </script>
 </body>
