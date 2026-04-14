@@ -52,16 +52,19 @@ BUFFER_COUNT = 4
 MOTION_ROI = (210, 270, 160, 40)
 
 # Ball detection
-BRIGHTNESS_THRESHOLD = 80
+BRIGHTNESS_THRESHOLD = 65
 MIN_BALL_AREA_REST = 40
 MAX_BALL_AREA_REST = 500
 MIN_CIRCULARITY_REST = 0.4
-REST_SEARCH_RADIUS = 40
-
 # Ball rest position — center of MOTION_ROI
 BALL_REST_X = MOTION_ROI[0] + MOTION_ROI[2] // 2   # 290
 BALL_REST_Y = MOTION_ROI[1] + MOTION_ROI[3] // 2   # 290
-ROI_REST_HALF = max(MOTION_ROI[2], MOTION_ROI[3]) // 2 + 10  # 90
+
+# Search radius covers the entire MOTION_ROI from its center
+_roi_half_w = MOTION_ROI[2] / 2
+_roi_half_h = MOTION_ROI[3] / 2
+REST_SEARCH_RADIUS = int(np.ceil(np.sqrt(_roi_half_w**2 + _roi_half_h**2))) + 5  # ~88
+ROI_REST_HALF = REST_SEARCH_RADIUS + 5
 
 # Output directory
 SCRIPT_DIR = Path(__file__).resolve().parent
