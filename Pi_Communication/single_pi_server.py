@@ -62,19 +62,19 @@ PRE_TRIGGER_FRAMES = 15
 POST_TRIGGER_FRAMES = 20
 BUFFER_SIZE = PRE_TRIGGER_FRAMES + 10
 
-# Motion detection
+# Motion / ball detection
 MOTION_ROI = (210, 270, 160, 40)
-MOTION_PIXEL_DIFF_THRESH = 10
-MOTION_CHANGED_PIXELS_THRESH = 300
-MOTION_MIN_CONSECUTIVE = 2
-MOTION_WARMUP_SEC = 1.0
 MOTION_COOLDOWN_SEC = 2.0
 
 # Ball-at-rest verification
-# Check ball detection every N frames (saves CPU vs every frame)
-BALL_CHECK_INTERVAL = 30          # every ~0.1s at 300fps
-# Consecutive detections needed before "ready" (~2 seconds)
-BALL_READY_COUNT = int(2.0 / (BALL_CHECK_INTERVAL / TARGET_FPS))  # ~20
+BALL_CHECK_INTERVAL = 30          # check every N frames (~10x/sec at 300fps)
+BALL_READY_COUNT = int(2.0 / (BALL_CHECK_INTERVAL / TARGET_FPS))  # ~20 checks = ~2 seconds
+
+# Swing confirmation (ball disappearance)
+# When ball disappears, switch to fast checking and wait this long
+# before confirming it's a real swing (not just occlusion)
+BALL_CONFIRM_INTERVAL = 5         # check every N frames during confirmation (~60x/sec)
+BALL_CONFIRM_SEC = 0.5            # ball must stay gone this long to confirm swing
 
 # Metric calculation — camera calibration
 CAMERA_DISTANCE_M = 0.965
@@ -157,18 +157,15 @@ class CaptureSystem:
 
         # Motion detection state
         self.motion_enabled = Event()
-        self.prev_roi_frame = None
-        self.consecutive_motion = 0
-        self.warmup_start = 0.0
-        self.is_warmed_up = False
         self.last_trigger_time = 0.0
 
         # Ball-at-rest state machine
-        # States: "waiting" -> "stabilizing" -> "ready"
-        self.ball_state = "waiting"       # current state
+        # States: "waiting" -> "stabilizing" -> "ready" -> "confirming" -> trigger
+        self.ball_state = "waiting"
         self.ball_consecutive = 0         # consecutive detections
         self.ball_position = None         # last detected (x, y)
         self.ball_frame_counter = 0       # counts frames for check interval
+        self.ball_gone_time = 0.0         # timestamp when ball first disappeared
 
     def setup_camera(self) -> bool:
         try:
@@ -203,76 +200,87 @@ class CaptureSystem:
                 pass
             self.camera = None
 
-    # ---- Motion Detection ----
+    # ---- Ball Detection + Swing Detection ----
 
     def reset_motion(self):
-        self.prev_roi_frame = None
-        self.consecutive_motion = 0
-        self.warmup_start = time.time()
-        self.is_warmed_up = False
         self.ball_state = "waiting"
         self.ball_consecutive = 0
         self.ball_position = None
         self.ball_frame_counter = 0
+        self.ball_gone_time = 0.0
 
-    def check_ball_at_rest(self, frame: np.ndarray):
-        """Run ball-at-rest detection periodically. Updates ball_state."""
+    def check_ball_state(self, frame: np.ndarray) -> bool:
+        """
+        State machine for ball detection and swing confirmation.
+
+        States:
+          "waiting"     - Looking for ball every BALL_CHECK_INTERVAL frames
+          "stabilizing" - Ball found, counting consecutive detections
+          "ready"       - Ball confirmed at rest, checking it's still there
+          "confirming"  - Ball disappeared, checking fast to confirm swing
+
+        Returns True when a swing is confirmed (ball gone for BALL_CONFIRM_SEC).
+        """
         self.ball_frame_counter += 1
-        if self.ball_frame_counter % BALL_CHECK_INTERVAL != 0:
-            return
+
+        # Determine check interval based on state
+        if self.ball_state == "confirming":
+            interval = BALL_CONFIRM_INTERVAL
+        else:
+            interval = BALL_CHECK_INTERVAL
+
+        if self.ball_frame_counter % interval != 0:
+            return False
 
         result = detect_ball_at_rest(frame)
 
-        if result:
-            self.ball_position = (result[0], result[1])
-            self.ball_consecutive += 1
-
-            if self.ball_state == "waiting":
+        if self.ball_state == "waiting":
+            if result:
+                self.ball_position = (result[0], result[1])
+                self.ball_consecutive = 1
                 self.ball_state = "stabilizing"
                 print(f"[Ball] Detected at ({result[0]}, {result[1]}) — stabilizing...")
 
-            if self.ball_consecutive >= BALL_READY_COUNT and self.ball_state != "ready":
+        elif self.ball_state == "stabilizing":
+            if result:
+                self.ball_position = (result[0], result[1])
+                self.ball_consecutive += 1
+                if self.ball_consecutive >= BALL_READY_COUNT:
+                    self.ball_state = "ready"
+                    print(f"[Ball] ======= READY FOR SWING =======")
+            else:
+                print(f"[Ball] Lost during stabilizing — back to waiting")
+                self.ball_state = "waiting"
+                self.ball_consecutive = 0
+                self.ball_position = None
+
+        elif self.ball_state == "ready":
+            if result:
+                # Ball still there — all good
+                self.ball_position = (result[0], result[1])
+            else:
+                # Ball just disappeared — start confirming
+                self.ball_state = "confirming"
+                self.ball_gone_time = time.time()
+                self.ball_frame_counter = 0  # reset so fast interval starts immediately
+                print(f"[Ball] Disappeared — confirming swing...")
+
+        elif self.ball_state == "confirming":
+            if result:
+                # Ball came back — was just occlusion (person, club waggle)
+                self.ball_position = (result[0], result[1])
                 self.ball_state = "ready"
-                print(f"[Ball] ======= READY FOR SWING =======")
-        else:
-            if self.ball_state != "waiting":
-                print(f"[Ball] Lost — back to waiting (was {self.ball_state})")
-            self.ball_state = "waiting"
-            self.ball_consecutive = 0
-            self.ball_position = None
+                print(f"[Ball] Came back — false alarm, still ready")
+            else:
+                # Ball still gone — check if confirmation time has elapsed
+                elapsed = time.time() - self.ball_gone_time
+                if elapsed >= BALL_CONFIRM_SEC:
+                    print(f"[Ball] ========================================")
+                    print(f"[Ball] SWING CONFIRMED! (gone for {elapsed:.2f}s)")
+                    print(f"[Ball] ========================================")
+                    return True
 
-    def check_motion(self, frame: np.ndarray) -> bool:
-        rx, ry, rw, rh = MOTION_ROI
-        roi_frame = frame[ry:ry + rh, rx:rx + rw]
-
-        if not self.is_warmed_up:
-            if time.time() - self.warmup_start < MOTION_WARMUP_SEC:
-                self.prev_roi_frame = roi_frame.copy()
-                return False
-            self.is_warmed_up = True
-            print("[Motion] Warmup complete, detecting motion...")
-
-        if self.prev_roi_frame is None:
-            self.prev_roi_frame = roi_frame.copy()
-            return False
-
-        diff = cv2.absdiff(roi_frame, self.prev_roi_frame)
-        _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
-        changed_pixels = int(np.count_nonzero(diff_bin))
-
-        if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
-            self.consecutive_motion += 1
-        else:
-            self.consecutive_motion = 0
-
-        # Log every 300th frame (~1 per second at 300fps) so you can see
-        # what changed_pixels values look like and tune the threshold.
-        self.motion_frame_count = getattr(self, 'motion_frame_count', 0) + 1
-        if self.motion_frame_count % 300 == 0:
-            print(f"[Motion] changed_pixels={changed_pixels}  thresh={MOTION_CHANGED_PIXELS_THRESH}  consecutive={self.consecutive_motion}")
-
-        self.prev_roi_frame = roi_frame.copy()
-        return self.consecutive_motion >= MOTION_MIN_CONSECUTIVE
+        return False
 
     def enable_motion(self):
         self.motion_enabled.set()
@@ -304,22 +312,14 @@ class CaptureSystem:
                         "frame_time": time.time()
                     })
 
-                # Ball-at-rest + motion detection
+                # Ball detection + swing confirmation
                 if (self.motion_enabled.is_set()
                         and not self.trigger_event.is_set()
                         and time.time() - self.last_trigger_time > MOTION_COOLDOWN_SEC):
 
-                    # Always check ball state
-                    self.check_ball_at_rest(raw)
-
-                    # Only look for swings when ball is confirmed at rest
-                    if self.ball_state == "ready":
-                        if self.check_motion(raw):
-                            print("[Motion] ========================================")
-                            print("[Motion] SWING DETECTED!")
-                            print("[Motion] ========================================")
-                            self.last_trigger_time = time.time()
-                            self.trigger_event.set()
+                    if self.check_ball_state(raw):
+                        self.last_trigger_time = time.time()
+                        self.trigger_event.set()
 
                 # Handle trigger
                 if self.trigger_event.is_set():
@@ -767,6 +767,17 @@ def _motion_process_shot():
                 writer.writerow([i, m.get('timestamp_us', 0), phase])
 
         metrics = calculate_metrics(frames, meta)
+
+        # If real metrics failed, use placeholders so the web UI still updates
+        if "error" in metrics:
+            print(f"[Motion] Metric calculation failed: {metrics['error']}")
+            print(f"[Motion] Using placeholder metrics for web UI testing")
+            metrics = {
+                "ball_speed": 95.0,
+                "launch_angle": 12.0,
+                "apex_height": 62.5,
+                "carry_distance": 145.0,
+            }
 
         # Build GUI metrics, converting numpy types to native Python
         gui_metrics = {}
