@@ -58,9 +58,12 @@ ANALOGUE_GAIN = 4.0
 BUFFER_COUNT = 4
 
 # Circular buffer
+# BUFFER_SIZE must cover worst-case gap between ball leaving ROI and the next
+# ball-check firing (BALL_CHECK_INTERVAL frames), plus enough pre-impact
+# frames to establish rest position. 45 frames = 150ms @ 300fps.
 PRE_TRIGGER_FRAMES = 15
 POST_TRIGGER_FRAMES = 20
-BUFFER_SIZE = PRE_TRIGGER_FRAMES + 10
+BUFFER_SIZE = 45
 
 # Motion / ball detection
 MOTION_ROI = (210, 270, 160, 40)
@@ -167,6 +170,11 @@ class CaptureSystem:
         self.ball_frame_counter = 0       # counts frames for check interval
         self.ball_gone_time = 0.0         # timestamp when ball first disappeared
 
+        # Latched buffer snapshot taken when ball first disappears.
+        # Preserves impact-window frames against the 0.5s confirmation delay.
+        self.pre_swing_frames: Optional[List[np.ndarray]] = None
+        self.pre_swing_meta: Optional[List[Dict]] = None
+
     def setup_camera(self) -> bool:
         try:
             print("[Capture] Setting up camera...")
@@ -208,6 +216,8 @@ class CaptureSystem:
         self.ball_position = None
         self.ball_frame_counter = 0
         self.ball_gone_time = 0.0
+        self.pre_swing_frames = None
+        self.pre_swing_meta = None
 
     def check_ball_state(self, frame: np.ndarray) -> bool:
         """
@@ -259,17 +269,23 @@ class CaptureSystem:
                 # Ball still there — all good
                 self.ball_position = (result[0], result[1])
             else:
-                # Ball just disappeared — start confirming
+                # Ball just disappeared — latch buffer snapshot NOW so impact
+                # frames survive the 0.5s confirmation window, then start confirming
+                with self.buffer_lock:
+                    self.pre_swing_frames = list(self.frame_buffer)
+                    self.pre_swing_meta = list(self.meta_buffer)
                 self.ball_state = "confirming"
                 self.ball_gone_time = time.time()
                 self.ball_frame_counter = 0  # reset so fast interval starts immediately
-                print(f"[Ball] Disappeared — confirming swing...")
+                print(f"[Ball] Disappeared — latched {len(self.pre_swing_frames)} pre-swing frames, confirming...")
 
         elif self.ball_state == "confirming":
             if result:
                 # Ball came back — was just occlusion (person, club waggle)
                 self.ball_position = (result[0], result[1])
                 self.ball_state = "ready"
+                self.pre_swing_frames = None
+                self.pre_swing_meta = None
                 print(f"[Ball] Came back — false alarm, still ready")
             else:
                 # Ball still gone — check if confirmation time has elapsed
@@ -339,9 +355,18 @@ class CaptureSystem:
     def _handle_trigger(self):
         print("[Capture] Trigger received! Saving frames...")
 
-        with self.buffer_lock:
-            self.captured_frames = list(self.frame_buffer)
-            self.captured_meta = list(self.meta_buffer)
+        # Prefer latched pre-swing snapshot (captured the instant ball disappeared).
+        # Falls back to the current buffer for manual triggers.
+        if self.pre_swing_frames is not None:
+            self.captured_frames = self.pre_swing_frames
+            self.captured_meta = self.pre_swing_meta
+            self.pre_swing_frames = None
+            self.pre_swing_meta = None
+            print(f"[Capture] Using latched pre-swing snapshot")
+        else:
+            with self.buffer_lock:
+                self.captured_frames = list(self.frame_buffer)
+                self.captured_meta = list(self.meta_buffer)
 
         pre_count = len(self.captured_frames)
         print(f"[Capture] Saved {pre_count} pre-trigger frames")

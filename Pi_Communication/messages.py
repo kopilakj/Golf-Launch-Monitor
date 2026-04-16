@@ -50,6 +50,11 @@ MSG_STROBE_ARM = "STROBE_ARM"       # Main -> Sensor (turn strobe on)
 MSG_STROBE_DISARM = "STROBE_DISARM" # Main -> Sensor (turn strobe off)
 MSG_ACK_STROBE = "ACK_STROBE"       # Sensor -> Main
 
+# Buffer freeze control (ball-disappearance snapshot)
+MSG_BUFFER_FREEZE = "BUFFER_FREEZE"       # Main -> Sensor (latch circular buffer)
+MSG_BUFFER_UNFREEZE = "BUFFER_UNFREEZE"   # Main -> Sensor (discard latch, false alarm)
+MSG_ACK_FREEZE = "ACK_FREEZE"             # Sensor -> Main
+
 # Utility
 MSG_ERROR = "ERROR"                 # Any direction (error response)
 MSG_PING = "PING"                   # Health check
@@ -314,6 +319,30 @@ def make_ack_strobe(armed: bool, request_id: str) -> Dict[str, Any]:
     """Create ACK_STROBE message (Sensor -> Main)."""
     header = base_header(MSG_ACK_STROBE, request_id)
     header["strobe_armed"] = armed
+    return header
+
+
+# =============================================================================
+# BUFFER FREEZE MESSAGES
+# =============================================================================
+
+def make_buffer_freeze(request_id: Optional[str] = None) -> Dict[str, Any]:
+    """Create BUFFER_FREEZE message (Main -> Sensor).
+    Sent the instant the ball disappears from the top camera's ROI so the
+    Sensor Pi latches its circular buffer before impact frames roll out."""
+    return base_header(MSG_BUFFER_FREEZE, request_id)
+
+
+def make_buffer_unfreeze(request_id: Optional[str] = None) -> Dict[str, Any]:
+    """Create BUFFER_UNFREEZE message (Main -> Sensor).
+    Sent if the ball reappears during the confirmation window (false alarm)."""
+    return base_header(MSG_BUFFER_UNFREEZE, request_id)
+
+
+def make_ack_freeze(frozen: bool, request_id: str) -> Dict[str, Any]:
+    """Create ACK_FREEZE message (Sensor -> Main)."""
+    header = base_header(MSG_ACK_FREEZE, request_id)
+    header["buffer_frozen"] = frozen
     return header
 
 

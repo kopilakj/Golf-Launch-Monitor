@@ -87,10 +87,23 @@ from messages import (
     MSG_CLUB_PRESET, MSG_ACK_PRESET, MSG_TRIGGER, MSG_ACK_TRIGGER,
     MSG_CSV_META, MSG_CSV_CHUNK, MSG_CSV_DONE, MSG_PING, MSG_PONG, MSG_ERROR,
     MSG_STROBE_ARM, MSG_STROBE_DISARM, MSG_ACK_STROBE,
+    MSG_BUFFER_FREEZE, MSG_BUFFER_UNFREEZE, MSG_ACK_FREEZE,
     make_club_preset, make_trigger, make_ping,
     make_strobe_arm, make_strobe_disarm,
+    make_buffer_freeze, make_buffer_unfreeze,
     new_shot_id, new_request_id, get_preset_version
 )
+
+
+# =============================================================================
+# SWING CONFIRMATION SETTINGS
+# =============================================================================
+
+# When ball disappears from ROI, wait this long checking fast before firing
+# the trigger. Guards against false triggers from occlusion (person walking,
+# club waggle). During this window the bottom Pi's buffer is frozen.
+BALL_CONFIRM_INTERVAL = 5      # check every N frames during confirmation (~60x/sec at 300fps)
+BALL_CONFIRM_SEC = 0.5         # ball must stay gone this long to confirm swing
 
 
 # =============================================================================
@@ -179,10 +192,12 @@ class MotionDetector:
         self.is_warmed_up: bool = False
 
         # Ball-at-rest state
+        # States: "waiting" -> "stabilizing" -> "ready" -> "confirming" -> trigger
         self.ball_state: str = "waiting"
         self.ball_consecutive: int = 0
         self.ball_position: Optional[Tuple[int, int]] = None
         self.ball_frame_counter: int = 0
+        self.ball_gone_time: float = 0.0
         self.ball_ready_count: int = int(
             BALL_READY_SECONDS / (BALL_CHECK_INTERVAL / MOTION_TARGET_FPS)
         )
@@ -247,6 +262,7 @@ class MotionDetector:
         self.ball_consecutive = 0
         self.ball_position = None
         self.ball_frame_counter = 0
+        self.ball_gone_time = 0.0
         state.ball_state = "waiting"
         state.ball_position = None
 
@@ -291,40 +307,83 @@ class MotionDetector:
 
         return best_candidate
 
-    def check_ball_at_rest(self, frame):
-        """Run ball-at-rest detection periodically. Updates ball_state."""
+    def check_ball_state(self, frame) -> bool:
+        """
+        State machine for ball detection and swing confirmation.
+
+        States:
+          "waiting"     - Looking for ball every BALL_CHECK_INTERVAL frames
+          "stabilizing" - Ball found, counting consecutive detections
+          "ready"       - Ball confirmed at rest; armed for swing
+          "confirming"  - Ball disappeared; bottom Pi buffer frozen; waiting
+                          BALL_CONFIRM_SEC before firing trigger
+
+        Returns True when a swing is confirmed.
+        """
         self.ball_frame_counter += 1
-        if self.ball_frame_counter % BALL_CHECK_INTERVAL != 0:
-            return
+
+        # Use fast check interval during confirmation, normal otherwise
+        interval = BALL_CONFIRM_INTERVAL if self.ball_state == "confirming" else BALL_CHECK_INTERVAL
+        if self.ball_frame_counter % interval != 0:
+            return False
 
         result = self.detect_ball_at_rest(frame)
-        prev_state = self.ball_state
+        swing_confirmed = False
 
-        if result:
-            self.ball_position = (result[0], result[1])
-            self.ball_consecutive += 1
-
-            if self.ball_state == "waiting":
+        if self.ball_state == "waiting":
+            if result:
+                self.ball_position = (result[0], result[1])
+                self.ball_consecutive = 1
                 self.ball_state = "stabilizing"
                 print(f"[Ball] Detected at ({result[0]}, {result[1]}) — stabilizing...")
-                # Arm strobe as soon as ball is detected
                 self._send_strobe_arm()
 
-            if self.ball_consecutive >= self.ball_ready_count and self.ball_state != "ready":
-                self.ball_state = "ready"
-                print(f"[Ball] ======= READY FOR SWING =======")
-        else:
-            if self.ball_state != "waiting":
-                print(f"[Ball] Lost — back to waiting (was {self.ball_state})")
-                # Disarm strobe when ball is lost
+        elif self.ball_state == "stabilizing":
+            if result:
+                self.ball_position = (result[0], result[1])
+                self.ball_consecutive += 1
+                if self.ball_consecutive >= self.ball_ready_count:
+                    self.ball_state = "ready"
+                    print(f"[Ball] ======= READY FOR SWING =======")
+            else:
+                print(f"[Ball] Lost during stabilizing — back to waiting")
+                self.ball_state = "waiting"
+                self.ball_consecutive = 0
+                self.ball_position = None
                 self._send_strobe_disarm()
-            self.ball_state = "waiting"
-            self.ball_consecutive = 0
-            self.ball_position = None
+
+        elif self.ball_state == "ready":
+            if result:
+                # Ball still there — all good
+                self.ball_position = (result[0], result[1])
+            else:
+                # Ball just disappeared — freeze bottom Pi's buffer NOW so
+                # impact frames survive the confirmation window
+                self._send_buffer_freeze()
+                self.ball_state = "confirming"
+                self.ball_gone_time = time.time()
+                self.ball_frame_counter = 0  # fast interval starts immediately
+                print(f"[Ball] Disappeared — buffer frozen, confirming swing...")
+
+        elif self.ball_state == "confirming":
+            if result:
+                # Ball came back — was just occlusion (person, club waggle)
+                self.ball_position = (result[0], result[1])
+                self.ball_state = "ready"
+                self._send_buffer_unfreeze()
+                print(f"[Ball] Came back — false alarm, buffer unfrozen, still ready")
+            else:
+                elapsed = time.time() - self.ball_gone_time
+                if elapsed >= BALL_CONFIRM_SEC:
+                    print(f"[Ball] ========================================")
+                    print(f"[Ball] SWING CONFIRMED! (gone for {elapsed:.2f}s)")
+                    print(f"[Ball] ========================================")
+                    swing_confirmed = True
 
         # Update shared state for API
         state.ball_state = self.ball_state
         state.ball_position = self.ball_position
+        return swing_confirmed
 
     def _send_strobe_arm(self):
         """Tell bottom Pi to turn strobe on."""
@@ -357,43 +416,40 @@ class MotionDetector:
         except Exception as e:
             print(f"[Bridge] Strobe disarm failed: {e}")
 
-    # ---- Motion (swing) detection ----
-
-    def check_frame(self, frame) -> Tuple[bool, int]:
-        """
-        Check a frame for swing motion.
-        Returns (triggered, changed_pixels).
-        """
-        rx, ry, rw, rh = MOTION_ROI
-        roi_frame = frame[ry:ry+rh, rx:rx+rw]
-
-        if not self.is_warmed_up:
-            if time.time() - self.warmup_start < MOTION_WARMUP_SEC:
-                self.prev_roi_frame = roi_frame.copy()
-                return False, 0
+    def _send_buffer_freeze(self):
+        """Tell bottom Pi to latch its circular buffer (ball just disappeared)."""
+        if not sensor.connected:
+            return
+        try:
+            msg = make_buffer_freeze()
+            sensor.send(msg)
+            header, _ = sensor.recv()
+            if header and header.get("msg_type") == MSG_ACK_FREEZE:
+                print("[Bridge] Buffer frozen on Sensor Pi")
             else:
-                self.is_warmed_up = True
-                print("[Motion] Warmup complete")
+                print("[Bridge] Buffer freeze — no ACK received")
+        except Exception as e:
+            print(f"[Bridge] Buffer freeze failed: {e}")
 
-        if self.prev_roi_frame is None:
-            self.prev_roi_frame = roi_frame.copy()
-            return False, 0
+    def _send_buffer_unfreeze(self):
+        """Tell bottom Pi to discard the latched buffer (false alarm)."""
+        if not sensor.connected:
+            return
+        try:
+            msg = make_buffer_unfreeze()
+            sensor.send(msg)
+            header, _ = sensor.recv()
+            if header and header.get("msg_type") == MSG_ACK_FREEZE:
+                print("[Bridge] Buffer unfrozen on Sensor Pi")
+            else:
+                print("[Bridge] Buffer unfreeze — no ACK received")
+        except Exception as e:
+            print(f"[Bridge] Buffer unfreeze failed: {e}")
 
-        diff = cv2.absdiff(roi_frame, self.prev_roi_frame)
-        _, diff_bin = cv2.threshold(diff, MOTION_PIXEL_DIFF_THRESH, 255, cv2.THRESH_BINARY)
-        changed_pixels = int(np.count_nonzero(diff_bin))
+    # ---- Swing trigger ----
 
-        if changed_pixels > MOTION_CHANGED_PIXELS_THRESH:
-            self.consecutive_motion += 1
-        else:
-            self.consecutive_motion = 0
-
-        self.prev_roi_frame = roi_frame.copy()
-
-        return self.consecutive_motion >= MOTION_MIN_CONSECUTIVE, changed_pixels
-
-    def on_motion_detected(self, changed_pixels: int):
-        """Called when swing is detected - triggers shot on bottom Pi."""
+    def on_swing_confirmed(self):
+        """Called when swing is confirmed by the state machine - fires trigger."""
         now = time.time()
         if now - self.last_trigger_time < self.trigger_cooldown_sec:
             print(f"[Motion] Cooldown active, ignoring trigger")
@@ -405,11 +461,7 @@ class MotionDetector:
 
         try:
             self.last_trigger_time = now
-
-            print(f"[Motion] ========================================")
-            print(f"[Motion] SWING DETECTED! (changed={changed_pixels})")
-            print(f"[Motion] Triggering shot on Sensor Pi...")
-            print(f"[Motion] ========================================")
+            print(f"[Motion] Firing trigger on Sensor Pi...")
 
             result = trigger_shot()
 
@@ -449,14 +501,11 @@ class MotionDetector:
                 raw = req.make_array("raw")
                 req.release()
 
-                # Always check ball state
-                self.check_ball_at_rest(raw)
-
-                # Only check for swings when ball is confirmed at rest
-                if self.ball_state == "ready":
-                    triggered, changed = self.check_frame(raw)
-                    if triggered:
-                        self.on_motion_detected(changed)
+                # State machine drives everything: ball tracking, buffer
+                # freeze/unfreeze, and swing confirmation. Returns True when
+                # a swing has been confirmed (ball gone for BALL_CONFIRM_SEC).
+                if self.check_ball_state(raw):
+                    self.on_swing_confirmed()
 
             except Exception as e:
                 print(f"[Motion] Error in detection loop: {e}")

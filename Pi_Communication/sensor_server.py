@@ -49,8 +49,9 @@ from messages import (
     MSG_CLUB_PRESET, MSG_ACK_PRESET, MSG_TRIGGER, MSG_ACK_TRIGGER,
     MSG_CSV_META, MSG_CSV_CHUNK, MSG_CSV_DONE, MSG_PING, MSG_ERROR,
     MSG_STROBE_ARM, MSG_STROBE_DISARM, MSG_ACK_STROBE,
+    MSG_BUFFER_FREEZE, MSG_BUFFER_UNFREEZE, MSG_ACK_FREEZE,
     make_ack_preset, make_ack_trigger, make_csv_meta, make_csv_chunk,
-    make_csv_done, make_error, make_pong, make_ack_strobe
+    make_csv_done, make_error, make_pong, make_ack_strobe, make_ack_freeze
 )
 
 
@@ -60,7 +61,9 @@ from messages import (
 
 PRE_TRIGGER_FRAMES = 15      # Frames to save before trigger
 POST_TRIGGER_FRAMES = 20     # Frames to save after trigger
-BUFFER_SIZE = PRE_TRIGGER_FRAMES + 10  # Circular buffer size
+# BUFFER_SIZE must cover the worst-case gap between ball leaving the top
+# camera's ROI and BUFFER_FREEZE arriving. 45 frames = 150ms @ 300fps.
+BUFFER_SIZE = 45             # Circular buffer size
 
 # Camera settings
 CAMERA_SIZE = (CAPTURE_WIDTH, CAPTURE_HEIGHT)
@@ -142,6 +145,12 @@ class CircularBufferCapture:
         self.captured_frames: List[np.ndarray] = []
         self.captured_meta: List[Dict] = []
         self.capture_complete = Event()
+
+        # Latched buffer snapshot taken when top Pi signals ball disappeared.
+        # Preserves impact-window frames against the 0.5s confirmation delay.
+        self.pre_swing_frames: Optional[List[np.ndarray]] = None
+        self.pre_swing_meta: Optional[List[Dict]] = None
+        self.pre_swing_lock = Lock()
 
         # IR strobe I2C control
         self.i2c_bus: Optional[SMBus] = None
@@ -296,12 +305,22 @@ class CircularBufferCapture:
     def _handle_trigger(self):
         """Handle trigger - save pre-buffer and capture post-trigger frames."""
         print(f"[Capture] Trigger received! Saving frames...")
-        
-        # Copy pre-trigger frames from buffer
-        with self.buffer_lock:
-            self.captured_frames = list(self.frame_buffer)
-            self.captured_meta = list(self.meta_buffer)
-        
+
+        # Prefer latched pre-swing snapshot (captured when top Pi detected
+        # ball disappearance). Falls back to current buffer for manual triggers
+        # or if BUFFER_FREEZE was never received.
+        with self.pre_swing_lock:
+            if self.pre_swing_frames is not None:
+                self.captured_frames = self.pre_swing_frames
+                self.captured_meta = self.pre_swing_meta
+                self.pre_swing_frames = None
+                self.pre_swing_meta = None
+                print(f"[Capture] Using latched pre-swing snapshot")
+            else:
+                with self.buffer_lock:
+                    self.captured_frames = list(self.frame_buffer)
+                    self.captured_meta = list(self.meta_buffer)
+
         pre_count = len(self.captured_frames)
         print(f"[Capture] Saved {pre_count} pre-trigger frames")
         
@@ -383,6 +402,21 @@ class CircularBufferCapture:
     def get_captured_frames(self) -> Tuple[List[np.ndarray], List[Dict]]:
         """Get the captured frames and metadata."""
         return self.captured_frames, self.captured_meta
+
+    def freeze_buffer(self) -> int:
+        """Latch the current circular buffer contents as the pre-swing snapshot.
+        Returns the number of frames latched."""
+        with self.pre_swing_lock:
+            with self.buffer_lock:
+                self.pre_swing_frames = list(self.frame_buffer)
+                self.pre_swing_meta = list(self.meta_buffer)
+            return len(self.pre_swing_frames)
+
+    def unfreeze_buffer(self):
+        """Discard the latched snapshot (false alarm)."""
+        with self.pre_swing_lock:
+            self.pre_swing_frames = None
+            self.pre_swing_meta = None
 
 
 # Global circular buffer capture instance
@@ -1122,6 +1156,22 @@ def handle_strobe_disarm(conn: socket.socket, header: Dict[str, Any]) -> None:
     print("[Sensor] Strobe disarmed via remote command")
 
 
+def handle_buffer_freeze(conn: socket.socket, header: Dict[str, Any]) -> None:
+    """Handle BUFFER_FREEZE — latch circular buffer as pre-swing snapshot."""
+    count = capture_system.freeze_buffer()
+    ack = make_ack_freeze(True, header["request_id"])
+    send_frame(conn, ack)
+    print(f"[Sensor] Buffer frozen — latched {count} pre-swing frames")
+
+
+def handle_buffer_unfreeze(conn: socket.socket, header: Dict[str, Any]) -> None:
+    """Handle BUFFER_UNFREEZE — discard latched snapshot (false alarm)."""
+    capture_system.unfreeze_buffer()
+    ack = make_ack_freeze(False, header["request_id"])
+    send_frame(conn, ack)
+    print("[Sensor] Buffer unfrozen (false alarm)")
+
+
 def handle_ping(conn: socket.socket, header: Dict[str, Any]) -> None:
     """Handle PING health check."""
     pong = make_pong(header["request_id"])
@@ -1167,6 +1217,12 @@ def handle_client(conn: socket.socket, addr: tuple) -> None:
 
             elif msg_type == MSG_STROBE_DISARM:
                 handle_strobe_disarm(conn, header)
+
+            elif msg_type == MSG_BUFFER_FREEZE:
+                handle_buffer_freeze(conn, header)
+
+            elif msg_type == MSG_BUFFER_UNFREEZE:
+                handle_buffer_unfreeze(conn, header)
 
             elif msg_type == MSG_PING:
                 handle_ping(conn, header)
