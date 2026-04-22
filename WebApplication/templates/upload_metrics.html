@@ -16,12 +16,23 @@
     </style>
 </head>
 <body>
-    <h1>{{ player_name }} - Upload Swing Data</h1>
-    <div class="upload-box">
+    <div class="main-container">
+        <h1>{{ player_name }}</h1>
+        <p class="club-subtext">Upload Swing Data</p>
+
         <form method="POST" enctype="multipart/form-data">
-            <input type="file" name="file" accept=".csv,.json" required><br>
-            <button type="submit">Upload & Display Metrics</button>
+            <input type="file" name="file" accept=".csv,.json" required>
+
+            <button class="back-button" type="submit">
+                Upload & Display Metrics
+            </button>
         </form>
+
+        <div class="back-container">
+            <a href="{{ url_for('back_to_players') }}">
+                <button class="back-button">Back</button>
+            </a>
+        </div>
     </div>
 </body>
 </html>
