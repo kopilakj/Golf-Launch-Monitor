@@ -43,6 +43,15 @@ except ImportError:
     SMBUS_AVAILABLE = False
     print("[Capture] smbus2 not available — strobe control disabled")
 
+# Prefer waitress (production WSGI) over the Flask dev server. The dev server
+# drops connections under concurrent polling, which is most of the reason the
+# web UI feels flaky across browsers.
+try:
+    from waitress import serve as waitress_serve
+    WAITRESS_AVAILABLE = True
+except ImportError:
+    WAITRESS_AVAILABLE = False
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -1172,8 +1181,7 @@ def _motion_process_shot():
 
         # Write JSON BEFORE debug overlays so the web page picks it up fast
         metrics_json_path = PROJECT_DIR / "WebApplication" / "latest_metrics.json"
-        with open(metrics_json_path, "w") as f:
-            json.dump(gui_metrics, f)
+        _write_json_atomic(metrics_json_path, gui_metrics)
 
         print(f"[Motion] Shot complete: {gui_metrics}")
 
@@ -1218,8 +1226,7 @@ def process_shot_manual(club_id: str) -> Dict[str, Any]:
     gui_metrics["club_id"] = club_id
 
     metrics_json_path = PROJECT_DIR / "WebApplication" / "latest_metrics.json"
-    with open(metrics_json_path, "w") as f:
-        json.dump(gui_metrics, f)
+    _write_json_atomic(metrics_json_path, gui_metrics)
 
     capture_system.reset_motion()
     print(f"[Shot] Manual shot complete: {gui_metrics}")
@@ -1236,6 +1243,27 @@ app = Flask(
     static_folder=str(STATIC_DIR),
 )
 app.secret_key = "dev"
+
+
+@app.after_request
+def _set_cache_headers(response):
+    # Safari in particular caches JSON aggressively; stale /api/latest_metrics
+    # and /api/motion/status responses make the UI look frozen. no-store is
+    # safe here — every endpoint is state-dependent.
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    else:
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    """Write JSON via tmp+rename so concurrent readers never see a partial file."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
 
 
 def db_connection():
@@ -1407,8 +1435,7 @@ def delete_users():
 def api_upload_metrics():
     data = request.get_json()
     metrics_path = PROJECT_DIR / "WebApplication" / "latest_metrics.json"
-    with open(metrics_path, "w") as f:
-        json.dump(data, f)
+    _write_json_atomic(metrics_path, data)
     return jsonify({"status": "success"})
 
 
@@ -1512,7 +1539,13 @@ def main():
     print()
 
     try:
-        app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False, threaded=True)
+        if WAITRESS_AVAILABLE:
+            print(f"[Server] Starting waitress on {FLASK_HOST}:{FLASK_PORT}...")
+            waitress_serve(app, host=FLASK_HOST, port=FLASK_PORT, threads=8)
+        else:
+            print("[Server] waitress not installed -- falling back to Flask dev server")
+            print("         install with: pip install waitress")
+            app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False, threaded=True)
     except KeyboardInterrupt:
         print("\n[Server] Shutting down...")
     finally:
