@@ -127,6 +127,27 @@ ROI_FLIGHT_HALF = 40
 ROI_GROWTH_PER_MISS = 10
 ROI_MAX_HALF = 80
 
+# Ball-vs-club discrimination and fit trust thresholds
+MAX_VALID_DETECTIONS = 20        # more than this = club head, not ball
+MIN_DETECTIONS_FOR_ANGLE = 5     # polyfit on fewer points is too noisy
+MIN_ASCENT_PX = 15               # track must rise this far above rest_y
+MIN_EARLY_ASCENT_PX = 5          # ball must rise by frame 3
+RETURN_TO_REST_PX = 30           # detection inside this radius = whiff
+BALLISTIC_OUTLIER_PX = 25        # reject detections this far from prediction
+SPEED_JUMP_RATIO_MAX = 2.5       # reject if speed jumps > 2.5x
+SPEED_JUMP_RATIO_MIN = 0.3       # or drops below 0.3x
+ABSOLUTE_MAX_BALL_MPH = 230      # physical ceiling (driver ~200)
+
+# Per-club expected top speeds (mph) — used as upper sanity cap = range_max * 1.3
+EXPECTED_SPEED_MAX_MPH = {
+    "driver": 180, "3wood": 160, "5wood": 155,
+    "3hybrid": 145, "4hybrid": 140,
+    "3iron": 140, "4iron": 135, "5iron": 140, "6iron": 130,
+    "7iron": 130, "8iron": 125, "9iron": 120,
+    "pitching_wedge": 110, "gap_wedge": 105,
+    "sand_wedge": 100, "lob_wedge": 95, "putter": 50,
+}
+
 # Club presets
 DEFAULT_CLUB = "7iron"
 
@@ -573,14 +594,26 @@ def get_contour_features(contour, gray_frame=None) -> dict:
     x, y, w, h = cv2.boundingRect(contour)
 
     brightness = 0
+    cx_sub, cy_sub = float(cx), float(cy)
     if gray_frame is not None:
         mask = np.zeros(gray_frame.shape, dtype=np.uint8)
         cv2.drawContours(mask, [contour], 0, 255, -1)
         brightness = cv2.mean(gray_frame, mask=mask)[0]
+        # Intensity-weighted sub-pixel centroid — better than the geometric
+        # centroid for bright compact blobs like the strobed ball.
+        ys_px, xs_px = np.where(mask > 0)
+        if len(xs_px) > 0:
+            I = gray_frame[ys_px, xs_px].astype(np.float64)
+            tot = I.sum()
+            if tot > 0:
+                cx_sub = float((xs_px * I).sum() / tot)
+                cy_sub = float((ys_px * I).sum() / tot)
 
     return {
         'area': area, 'circularity': circularity,
-        'cx': cx, 'cy': cy, 'bbox': (x, y, w, h),
+        'cx': cx, 'cy': cy,
+        'cx_sub': cx_sub, 'cy_sub': cy_sub,
+        'bbox': (x, y, w, h),
         'brightness': brightness
     }
 
@@ -628,7 +661,9 @@ def detect_ball_at_rest(frame):
 
 def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
                           roi_center=None, roi_half=ROI_FLIGHT_HALF,
-                          min_x=None, max_y=None):
+                          min_x=None, max_y=None, top_n=1):
+    """Returns (cx_sub, cy_sub) sub-pixel floats when top_n=1, else a list of
+    up to top_n such tuples sorted by score descending (best first)."""
     gray_curr = current_frame if len(current_frame.shape) == 2 else cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
     gray_ref = reference_frame if len(reference_frame.shape) == 2 else cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
 
@@ -636,8 +671,9 @@ def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
     if roi_center:
         diff = apply_roi_box(diff, int(roi_center[0]), int(roi_center[1]), roi_half)
 
-    best_candidate = None
-    best_score = -1
+    # Collect (score, cx_sub, cy_sub); dedupe candidates that appear at
+    # multiple thresholds by keeping the highest-scoring one per ~3px bucket.
+    bucket = {}  # (cx//3, cy//3) -> (score, cx_sub, cy_sub)
 
     for thresh_val in [MOTION_THRESHOLD, MOTION_THRESHOLD - 5, MOTION_THRESHOLD + 10]:
         if thresh_val < 10:
@@ -656,23 +692,29 @@ def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
             aspect = max(bbox_w, bbox_h) / max(1, min(bbox_w, bbox_h))
             if aspect > 3.0:
                 continue
-            if min_x is not None and features['cx'] < min_x:
+            if min_x is not None and features['cx_sub'] < min_x:
                 continue
-            if max_y is not None and features['cy'] > max_y:
+            if max_y is not None and features['cy_sub'] > max_y:
                 continue
             score = features['circularity'] * 100
             if prev_position:
-                dy = features['cy'] - prev_position[1]
+                dy = features['cy_sub'] - prev_position[1]
                 if dy < 0:
                     score += 40
-            if score > best_score:
-                best_score = score
-                best_candidate = (features['cx'], features['cy'])
+            key = (int(features['cx']) // 3, int(features['cy']) // 3)
+            entry = (score, features['cx_sub'], features['cy_sub'])
+            if key not in bucket or bucket[key][0] < score:
+                bucket[key] = entry
 
-    return best_candidate
+    ranked = sorted(bucket.values(), key=lambda e: e[0], reverse=True)
+    if not ranked:
+        return None if top_n == 1 else []
+    if top_n == 1:
+        return (ranked[0][1], ranked[0][2])
+    return [(e[1], e[2]) for e in ranked[:top_n]]
 
 
-def calculate_metrics(frames, meta, known_rest_position=None):
+def calculate_metrics(frames, meta, known_rest_position=None, club_id=None):
     if len(frames) < 5:
         return {"error": "Not enough frames for analysis"}
 
@@ -682,9 +724,6 @@ def calculate_metrics(frames, meta, known_rest_position=None):
     rest_frame_idx = None
 
     if known_rest_position is not None:
-        # Rest position was locked in at ready-state; use it directly.
-        # Use the earliest frame (pre-impact, ambient-lit) as reference so the
-        # flight frame-differencing has a clean background.
         rest_position = (int(known_rest_position[0]), int(known_rest_position[1]))
         rest_frame_idx = 0
         print(f"[Metrics] Ball at rest (locked): {rest_position}")
@@ -695,11 +734,9 @@ def calculate_metrics(frames, meta, known_rest_position=None):
                 rest_position = (result[0], result[1])
                 rest_frame_idx = i
                 break
-
         if not rest_position:
             print("[Metrics] Could not find ball at rest")
             return {"error": "Could not detect ball at rest"}
-
         print(f"[Metrics] Ball at rest: {rest_position} (frame {rest_frame_idx})")
 
     reference_frame = frames[rest_frame_idx]
@@ -724,39 +761,78 @@ def calculate_metrics(frames, meta, known_rest_position=None):
             ball_departed = True
             print(f"[Metrics] Ball departed at frame {i}")
 
-        # Ball must move rightward — reject anything left of rest (first detection)
-        # or left of the previous accepted detection (with small jitter tolerance).
+        # Directional constraints passed into the detector so noise blobs that
+        # would violate them never beat the real ball on score.
         if not detections:
             min_x = rest_position[0] + 2
         else:
-            min_x = detections[-1]['x'] - 3
-        # Once ascending (y decreasing in image coords), reject any detection
-        # that would descend past the last y. Allow small noise tolerance.
+            min_x = detections[-1]['x_sub'] - 3
         max_y = None
         if len(detections) >= 2:
-            prev_dy = detections[-1]['y'] - detections[-2]['y']
+            prev_dy = detections[-1]['y_sub'] - detections[-2]['y_sub']
             if prev_dy < -3:
-                max_y = detections[-1]['y'] + 3
+                max_y = detections[-1]['y_sub'] + 3
 
-        pos = detect_ball_in_flight(frames[i], reference_frame, prev_pos,
-                                    roi_center=roi_center, roi_half=roi_half,
-                                    min_x=min_x, max_y=max_y)
-        if pos:
-            dist_from_rest = np.sqrt((pos[0] - rest_position[0]) ** 2 +
-                                     (pos[1] - rest_position[1]) ** 2)
+        # Predict where the ball should be in this frame, if we have history.
+        predicted_pos = None
+        if len(detections) >= 2:
+            last, prev = detections[-1], detections[-2]
+            vx = last['x_sub'] - prev['x_sub']
+            vy = last['y_sub'] - prev['y_sub']
+            predicted_pos = (last['x_sub'] + vx, last['y_sub'] + vy)
+
+        # Request top 3 candidates so we can do data association (pick the one
+        # nearest our ballistic prediction) instead of blindly trusting score.
+        candidates = detect_ball_in_flight(
+            frames[i], reference_frame, prev_pos,
+            roi_center=roi_center, roi_half=roi_half,
+            min_x=min_x, max_y=max_y, top_n=3)
+
+        pos = None
+        if candidates:
+            if predicted_pos is not None and len(candidates) > 1:
+                # Prefer the candidate closest to prediction if the best-scoring
+                # one is far off; tolerate BALLISTIC_OUTLIER_PX of wobble.
+                best = candidates[0]
+                best_d = np.hypot(best[0] - predicted_pos[0], best[1] - predicted_pos[1])
+                if best_d > BALLISTIC_OUTLIER_PX:
+                    for c in candidates[1:]:
+                        d = np.hypot(c[0] - predicted_pos[0], c[1] - predicted_pos[1])
+                        if d < best_d and d <= BALLISTIC_OUTLIER_PX:
+                            best, best_d = c, d
+                pos = best if best_d <= BALLISTIC_OUTLIER_PX else None
+                if pos is None:
+                    print(f"[Metrics] Frame {i}: all candidates off prediction (best d={best_d:.1f}px) — treated as miss")
+            else:
+                pos = candidates[0]
+
+        # Speed-jump filter: reject if step size relative to previous is way off.
+        if pos is not None and len(detections) >= 2:
+            last, prev = detections[-1], detections[-2]
+            prev_step = np.hypot(last['x_sub'] - prev['x_sub'], last['y_sub'] - prev['y_sub'])
+            new_step = np.hypot(pos[0] - last['x_sub'], pos[1] - last['y_sub'])
+            if prev_step > 3:
+                ratio = new_step / prev_step
+                if ratio > SPEED_JUMP_RATIO_MAX or ratio < SPEED_JUMP_RATIO_MIN:
+                    print(f"[Metrics] Frame {i}: speed-jump ratio {ratio:.2f} — rejecting")
+                    pos = None
+
+        if pos is not None:
+            dist_from_rest = np.hypot(pos[0] - rest_position[0], pos[1] - rest_position[1])
             if dist_from_rest > 20:
                 detections.append({
-                    'frame_idx': i, 'x': pos[0], 'y': pos[1],
+                    'frame_idx': i,
+                    'x': int(round(pos[0])), 'y': int(round(pos[1])),
+                    'x_sub': float(pos[0]), 'y_sub': float(pos[1]),
                     'timestamp_us': meta[i].get('timestamp_us', 0)
                 })
                 prev_pos = pos
-                # Predictive ROI: project next position from last velocity once
-                # we have 2+ detections. Before that, track the last position.
+                # Predictive ROI for next frame.
                 if len(detections) >= 2:
                     last, prev = detections[-1], detections[-2]
-                    vx = last['x'] - prev['x']
-                    vy = last['y'] - prev['y']
-                    roi_center = (last['x'] + vx, last['y'] + vy)
+                    vx = last['x_sub'] - prev['x_sub']
+                    vy = last['y_sub'] - prev['y_sub']
+                    roi_center = (last['x_sub'] + vx, last['y_sub'] + vy)
                 else:
                     roi_center = pos
                 roi_half = ROI_FLIGHT_HALF
@@ -766,14 +842,6 @@ def calculate_metrics(frames, meta, known_rest_position=None):
                 continue
             else:
                 print(f"[Metrics] Frame {i}: candidate {pos} rejected (too close to rest, d={dist_from_rest:.1f})")
-        else:
-            constraint_tag = []
-            if min_x is not None:
-                constraint_tag.append(f"min_x={min_x}")
-            if max_y is not None:
-                constraint_tag.append(f"max_y={max_y}")
-            tag = (" [" + ", ".join(constraint_tag) + "]") if constraint_tag else ""
-            print(f"[Metrics] Frame {i}: no candidate passed filters{tag}")
 
         frames_missed += 1
         roi_half = min(roi_half + ROI_GROWTH_PER_MISS, ROI_MAX_HALF)
@@ -782,70 +850,117 @@ def calculate_metrics(frames, meta, known_rest_position=None):
 
     print(f"[Metrics] Found {len(detections)} post-impact detections")
 
-    if len(detections) < 2:
-        return {"error": "Not enough ball detections in flight"}
+    # ---------------- Post-loop validation ----------------
 
-    velocities_mps = []
-    for i in range(min(4, len(detections) - 1)):
-        d1, d2 = detections[i], detections[i + 1]
-        dx_m = (d2['x'] - d1['x']) * METERS_PER_PIXEL
-        dy_m = -(d2['y'] - d1['y']) * METERS_PER_PIXEL
-        if d1['timestamp_us'] and d2['timestamp_us']:
-            dt = (d2['timestamp_us'] - d1['timestamp_us']) / 1_000_000_000
-        else:
-            dt = SECONDS_PER_FRAME
-        if dt > 0:
-            speed = np.sqrt(dx_m ** 2 + dy_m ** 2) / dt
-            velocities_mps.append(speed)
-
-    if not velocities_mps:
-        return {"error": "Could not calculate velocity"}
-
-    velocity_mps = max(velocities_mps)
-    ball_speed_mph = velocity_mps * 2.237
-    print(f"[Metrics] Ball speed: {ball_speed_mph:.1f} mph")
-
-    if len(detections) >= 2:
-        x_vals = [d['x'] for d in detections[:5]]
-        y_vals = [d['y'] for d in detections[:5]]
-        x_m = [(x - rest_position[0]) * METERS_PER_PIXEL for x in x_vals]
-        y_m = [-(y - rest_position[1]) * METERS_PER_PIXEL for y in y_vals]
-        if len(x_m) >= 2 and (max(x_m) - min(x_m)) > 0:
-            slope, _ = np.polyfit(x_m, y_m, 1)
-            launch_angle_deg = np.degrees(np.arctan(slope))
-        else:
-            launch_angle_deg = 12.0
-    else:
-        launch_angle_deg = 12.0
-
-    # Reject negative launch angles — ball must go up
-    if launch_angle_deg <= 0:
-        print(f"[Metrics] Negative launch angle ({launch_angle_deg:.1f}), defaulting to 12.0")
-        launch_angle_deg = 12.0
-
-    print(f"[Metrics] Launch angle: {launch_angle_deg:.1f} degrees")
-    apex_height_ft, carry_distance_yds = simulate_trajectory(velocity_mps, launch_angle_deg)
-
-    # Apex height must be positive — recalculate with default angle if needed
-    if apex_height_ft <= 0:
-        print(f"[Metrics] Apex height was 0, recalculating with 12.0 deg fallback")
-        apex_height_ft, carry_distance_yds = simulate_trajectory(velocity_mps, 12.0)
-
-    return {
-        "ball_speed": round(ball_speed_mph, 1),
-        "launch_angle": round(launch_angle_deg, 1),
-        "apex_height": round(apex_height_ft, 1),
-        "carry_distance": round(carry_distance_yds, 1),
+    base = {
         "frames_analyzed": len(frames),
         "detections": len(detections),
         "rest_x": int(rest_position[0]),
         "rest_y": int(rest_position[1]),
-        # Underscore-prefixed keys are stripped before sending to the GUI
-        # (see _motion_process_shot) but are needed by debug overlay generation.
         "_rest_position": rest_position,
         "_detections": detections,
         "_known_rest": known_rest_position is not None,
     }
+
+    if len(detections) < 2:
+        return {**base, "error": "Not enough ball detections in flight"}
+
+    # Whiff / club-head tracked: too many detections = club head traced through
+    if len(detections) > MAX_VALID_DETECTIONS:
+        return {**base, "error": f"Too many detections ({len(detections)}) — likely tracked club head, not ball"}
+
+    # Whiff: tracked object wandered back near rest position after initial move
+    returned_near_rest = any(
+        np.hypot(d['x_sub'] - rest_position[0], d['y_sub'] - rest_position[1]) < RETURN_TO_REST_PX
+        for d in detections[2:]
+    )
+    if returned_near_rest:
+        return {**base, "error": "Track returned near rest position — likely whiff / club head"}
+
+    # Ground-hugging track: never rose meaningfully above rest_y
+    max_ascent = max(rest_position[1] - d['y_sub'] for d in detections)
+    if max_ascent < MIN_ASCENT_PX:
+        return {**base, "error": f"Track never rose above rest (max ascent {max_ascent:.1f}px) — likely club head"}
+
+    # Early ascent: by the third detection, ball should be off the ground
+    if len(detections) >= 3:
+        early_ascent = rest_position[1] - detections[2]['y_sub']
+        if early_ascent < MIN_EARLY_ASCENT_PX:
+            return {**base, "error": f"Ball did not ascend by frame 3 (ascent {early_ascent:.1f}px) — likely club head"}
+
+    # ---------------- Velocity + launch angle (line fit in time) ----------------
+
+    t0 = detections[0]['timestamp_us']
+    ts = np.array([(d['timestamp_us'] - t0) / 1_000_000_000 for d in detections], dtype=np.float64)
+    # If timestamps are unavailable (all zero / not populated), use frame index.
+    if not np.any(ts):
+        fr = np.array([d['frame_idx'] for d in detections], dtype=np.float64)
+        ts = (fr - fr[0]) * SECONDS_PER_FRAME
+
+    xs_m = np.array([(d['x_sub'] - rest_position[0]) * METERS_PER_PIXEL for d in detections], dtype=np.float64)
+    ys_m = np.array([-(d['y_sub'] - rest_position[1]) * METERS_PER_PIXEL for d in detections], dtype=np.float64)
+
+    if ts[-1] - ts[0] <= 0:
+        return {**base, "error": "Detections have no time separation"}
+
+    # x(t) linear fit → vx0
+    vx_m = float(np.polyfit(ts, xs_m, 1)[0])
+
+    # y(t) linear fit over first few frames — gravity drop is sub-millimeter over
+    # this window, so linear is fine and more stable than parabolic.
+    angle_n = min(MIN_DETECTIONS_FOR_ANGLE, len(ts))
+    vy_m = float(np.polyfit(ts[:angle_n], ys_m[:angle_n], 1)[0])
+
+    velocity_mps = float(np.hypot(vx_m, vy_m))
+    ball_speed_mph = velocity_mps * 2.237
+    print(f"[Metrics] Ball speed (fit): {ball_speed_mph:.1f} mph  (vx={vx_m:.2f}, vy={vy_m:.2f} m/s)")
+
+    # --- Speed sanity check ---
+    speed_cap = ABSOLUTE_MAX_BALL_MPH
+    if club_id:
+        expected = EXPECTED_SPEED_MAX_MPH.get(club_id)
+        if expected is not None:
+            speed_cap = min(speed_cap, expected * 1.3)
+    if ball_speed_mph > speed_cap:
+        return {**base, "error": f"Ball speed {ball_speed_mph:.1f} mph exceeds physical cap {speed_cap:.0f} — timing artifact"}
+
+    # --- Launch angle (only trustworthy with enough detections) ---
+    can_trust_angle = len(detections) >= MIN_DETECTIONS_FOR_ANGLE
+
+    launch_angle_deg = None
+    apex_height_ft = None
+    carry_distance_yds = None
+
+    if can_trust_angle:
+        launch_angle_deg = float(np.degrees(np.arctan2(vy_m, vx_m)))
+        print(f"[Metrics] Launch angle (fit): {launch_angle_deg:.1f} degrees")
+        if launch_angle_deg < -10 or launch_angle_deg > 60:
+            print(f"[Metrics] Implausible launch angle {launch_angle_deg:.1f}° — dropping angle-dependent metrics")
+            launch_angle_deg = None
+        elif launch_angle_deg <= 0:
+            # Ball fitted to go down/flat — physically implausible for a real shot
+            print(f"[Metrics] Non-positive launch angle {launch_angle_deg:.1f}° — dropping")
+            launch_angle_deg = None
+
+    if launch_angle_deg is not None:
+        apex_height_ft, carry_distance_yds = simulate_trajectory(velocity_mps, launch_angle_deg)
+        if apex_height_ft <= 0 or carry_distance_yds <= 0:
+            apex_height_ft = None
+            carry_distance_yds = None
+
+    result = {
+        **base,
+        "ball_speed": round(ball_speed_mph, 1),
+    }
+    if launch_angle_deg is not None:
+        result["launch_angle"] = round(launch_angle_deg, 1)
+    if apex_height_ft is not None:
+        result["apex_height"] = round(apex_height_ft, 1)
+    if carry_distance_yds is not None:
+        result["carry_distance"] = round(carry_distance_yds, 1)
+    if not can_trust_angle:
+        result["note"] = f"Launch angle suppressed: only {len(detections)} detections (need {MIN_DETECTIONS_FOR_ANGLE})"
+    return result
 
 
 def simulate_trajectory(velocity_mps, launch_angle_deg):
@@ -956,7 +1071,7 @@ def generate_debug_overlays(frames, meta, metrics, out_dir):
             flt = detect_ball_in_flight(frame, reference_frame, rest_position,
                                         roi_center=rest_position, roi_half=ROI_FLIGHT_HALF)
             if flt:
-                tracked_pos = flt
+                tracked_pos = (int(round(flt[0])), int(round(flt[1])))
 
         if tracked_pos:
             cv2.circle(overlay, tracked_pos, 12, LIGHT_BLUE, 2)
@@ -1035,18 +1150,14 @@ def _motion_process_shot():
         # Pass the locked rest position (latched when ball disappeared) so
         # metric calc doesn't have to re-find it in strobe-lit frames.
         rest_pos = capture_system.pre_swing_rest_position or capture_system.rest_position_locked
-        metrics = calculate_metrics(frames, meta, known_rest_position=rest_pos)
+        metrics = calculate_metrics(frames, meta, known_rest_position=rest_pos,
+                                    club_id=current_club_preset)
 
-        # If real metrics failed, use placeholders so the web UI still updates
+        # Surface the error to the UI rather than masking it with placeholders.
+        # Any valid partial metrics (e.g. ball_speed without launch_angle) are
+        # preserved alongside the error string so the UI can show what it has.
         if "error" in metrics:
             print(f"[Motion] Metric calculation failed: {metrics['error']}")
-            print(f"[Motion] Using placeholder metrics for web UI testing")
-            metrics = {
-                "ball_speed": 95.0,
-                "launch_angle": 12.0,
-                "apex_height": 62.5,
-                "carry_distance": 145.0,
-            }
 
         # Build GUI metrics, converting numpy types to native Python
         gui_metrics = {}
@@ -1100,7 +1211,7 @@ def process_shot_manual(club_id: str) -> Dict[str, Any]:
         cv2.imwrite(str(out_dir / f"frame_{i:04d}.png"), frame)
 
     rest_pos = capture_system.pre_swing_rest_position or capture_system.rest_position_locked
-    metrics = calculate_metrics(frames, meta, known_rest_position=rest_pos)
+    metrics = calculate_metrics(frames, meta, known_rest_position=rest_pos, club_id=club_id)
 
     gui_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
     gui_metrics["shot_id"] = shot_id
