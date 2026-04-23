@@ -33,6 +33,16 @@ import cv2
 from picamera2 import Picamera2
 from flask import Flask, redirect, url_for, render_template, session, request, jsonify
 
+# Optional I2C strobe control. If smbus2 isn't installed (or the strobe board
+# isn't wired up) the system still works — ball detection just runs without
+# strobe illumination.
+try:
+    from smbus2 import SMBus, i2c_msg
+    SMBUS_AVAILABLE = True
+except ImportError:
+    SMBUS_AVAILABLE = False
+    print("[Capture] smbus2 not available — strobe control disabled")
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -53,7 +63,13 @@ CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 400
 CAMERA_SIZE = (CAPTURE_WIDTH, CAPTURE_HEIGHT)
 TARGET_FPS = 300
-EXPOSURE_US = 2000
+# Two exposure modes — switched live based on ball state:
+#   DETECTION_EXPOSURE_US: long exposure for finding the ball in ambient light
+#                          (used while state is waiting/stabilizing, strobe off)
+#   CAPTURE_EXPOSURE_US:   short exposure for strobe-lit frames during a swing
+#                          (used once ball reaches ready state, strobe armed)
+DETECTION_EXPOSURE_US = 2000
+CAPTURE_EXPOSURE_US = 500
 ANALOGUE_GAIN = 4.0
 BUFFER_COUNT = 4
 
@@ -175,6 +191,21 @@ class CaptureSystem:
         self.pre_swing_frames: Optional[List[np.ndarray]] = None
         self.pre_swing_meta: Optional[List[Dict]] = None
 
+        # Ball center (x, y) locked in when state reaches "ready". This is the
+        # authoritative rest position for the shot — passed to metric calc so
+        # it doesn't have to re-detect the rest position from strobed frames.
+        self.rest_position_locked: Optional[Tuple[int, int]] = None
+        self.pre_swing_rest_position: Optional[Tuple[int, int]] = None
+
+        # IR strobe (I2C). Armed once ball is confirmed at rest and disarmed
+        # after shot processing. Strobe off => detection exposure (ambient).
+        self.i2c_bus: Optional["SMBus"] = None
+        if SMBUS_AVAILABLE:
+            self.strobe_on_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x08])
+            self.strobe_off_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x00])
+        self.strobe_armed = False
+        self.current_exposure_us = DETECTION_EXPOSURE_US
+
     def setup_camera(self) -> bool:
         try:
             print("[Capture] Setting up camera...")
@@ -188,12 +219,31 @@ class CaptureSystem:
             time.sleep(0.5)
 
             frame_us = int(1_000_000 / TARGET_FPS)
+            self.current_exposure_us = DETECTION_EXPOSURE_US
             self.camera.set_controls({
                 "FrameDurationLimits": (frame_us, frame_us),
-                "ExposureTime": EXPOSURE_US,
+                "ExposureTime": self.current_exposure_us,
                 "AnalogueGain": ANALOGUE_GAIN,
             })
-            print(f"[Capture] Camera ready: {CAMERA_SIZE} @ {TARGET_FPS}fps")
+            print(f"[Capture] Camera ready: {CAMERA_SIZE} @ {TARGET_FPS}fps "
+                  f"(detection exposure {DETECTION_EXPOSURE_US}us)")
+
+            # Initialize IR strobe via I2C (graceful fallback if not present)
+            if SMBUS_AVAILABLE:
+                try:
+                    self.i2c_bus = SMBus(10)
+                    # FSTROBE pin as output (0x3006 = 0x0C)
+                    self.i2c_bus.i2c_rdwr(i2c_msg.write(0x60, [0x30, 0x06, 0x0C]))
+                    # Enable register-controlled strobe mode (0x3027 bit[3] = 1)
+                    self.i2c_bus.i2c_rdwr(i2c_msg.write(0x60, [0x30, 0x27, 0x08]))
+                    # Ensure strobe starts OFF
+                    self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
+                    self.strobe_armed = False
+                    print("[Capture] IR strobe initialized on I2C bus 10")
+                except Exception as e:
+                    print(f"[Capture] IR strobe init failed (continuing without strobe): {e}")
+                    self.i2c_bus = None
+
             return True
         except Exception as e:
             print(f"[Capture] Camera setup failed: {e}")
@@ -201,12 +251,55 @@ class CaptureSystem:
             return False
 
     def cleanup_camera(self):
+        if self.i2c_bus:
+            try:
+                self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
+                self.i2c_bus.close()
+            except:
+                pass
+            self.i2c_bus = None
+            self.strobe_armed = False
         if self.camera:
             try:
                 self.camera.close()
             except:
                 pass
             self.camera = None
+
+    # ---- Exposure + Strobe control ----
+
+    def set_exposure(self, exposure_us: int):
+        """Switch camera exposure live. Safe to call from the capture thread."""
+        if self.camera is None or exposure_us == self.current_exposure_us:
+            return
+        try:
+            self.camera.set_controls({"ExposureTime": exposure_us})
+            self.current_exposure_us = exposure_us
+            print(f"[Capture] Exposure -> {exposure_us}us")
+        except Exception as e:
+            print(f"[Capture] Failed to set exposure {exposure_us}us: {e}")
+
+    def arm_strobe(self):
+        """Turn IR strobe on. Called when ball reaches ready state."""
+        if not self.i2c_bus or self.strobe_armed:
+            return
+        try:
+            self.i2c_bus.i2c_rdwr(self.strobe_on_msg)
+            self.strobe_armed = True
+            print("[Capture] IR strobe ARMED")
+        except Exception as e:
+            print(f"[Capture] Failed to arm strobe: {e}")
+
+    def disarm_strobe(self):
+        """Turn IR strobe off. Called after shot processing or motion disable."""
+        if not self.i2c_bus or not self.strobe_armed:
+            return
+        try:
+            self.i2c_bus.i2c_rdwr(self.strobe_off_msg)
+            self.strobe_armed = False
+            print("[Capture] IR strobe DISARMED")
+        except Exception as e:
+            print(f"[Capture] Failed to disarm strobe: {e}")
 
     # ---- Ball Detection + Swing Detection ----
 
@@ -218,6 +311,11 @@ class CaptureSystem:
         self.ball_gone_time = 0.0
         self.pre_swing_frames = None
         self.pre_swing_meta = None
+        self.rest_position_locked = None
+        self.pre_swing_rest_position = None
+        # Drop back to ambient ball-hunting mode
+        self.disarm_strobe()
+        self.set_exposure(DETECTION_EXPOSURE_US)
 
     def check_ball_state(self, frame: np.ndarray) -> bool:
         """
@@ -257,7 +355,13 @@ class CaptureSystem:
                 self.ball_consecutive += 1
                 if self.ball_consecutive >= BALL_READY_COUNT:
                     self.ball_state = "ready"
-                    print(f"[Ball] ======= READY FOR SWING =======")
+                    # Lock in the rest position — this is the authoritative
+                    # starting point for metric calculation
+                    self.rest_position_locked = self.ball_position
+                    # Ball locked in — switch camera to strobe-lit capture mode
+                    self.set_exposure(CAPTURE_EXPOSURE_US)
+                    self.arm_strobe()
+                    print(f"[Ball] ======= READY FOR SWING at {self.rest_position_locked} =======")
             else:
                 print(f"[Ball] Lost during stabilizing — back to waiting")
                 self.ball_state = "waiting"
@@ -274,6 +378,9 @@ class CaptureSystem:
                 with self.buffer_lock:
                     self.pre_swing_frames = list(self.frame_buffer)
                     self.pre_swing_meta = list(self.meta_buffer)
+                # Latch the locked rest position too so metric calc doesn't
+                # have to re-find it in the strobed frames after impact
+                self.pre_swing_rest_position = self.rest_position_locked
                 self.ball_state = "confirming"
                 self.ball_gone_time = time.time()
                 self.ball_frame_counter = 0  # reset so fast interval starts immediately
@@ -286,6 +393,7 @@ class CaptureSystem:
                 self.ball_state = "ready"
                 self.pre_swing_frames = None
                 self.pre_swing_meta = None
+                self.pre_swing_rest_position = None
                 print(f"[Ball] Came back — false alarm, still ready")
             else:
                 # Ball still gone — check if confirmation time has elapsed
@@ -305,6 +413,8 @@ class CaptureSystem:
 
     def disable_motion(self):
         self.motion_enabled.clear()
+        self.disarm_strobe()
+        self.set_exposure(DETECTION_EXPOSURE_US)
         print("[Motion] Disabled")
 
     # ---- Capture Loop ----
@@ -548,7 +658,7 @@ def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
     return best_candidate
 
 
-def calculate_metrics(frames, meta):
+def calculate_metrics(frames, meta, known_rest_position=None):
     if len(frames) < 5:
         return {"error": "Not enough frames for analysis"}
 
@@ -557,18 +667,27 @@ def calculate_metrics(frames, meta):
     rest_position = None
     rest_frame_idx = None
 
-    for i in range(min(10, len(frames))):
-        result = detect_ball_at_rest(frames[i])
-        if result:
-            rest_position = (result[0], result[1])
-            rest_frame_idx = i
-            break
+    if known_rest_position is not None:
+        # Rest position was locked in at ready-state; use it directly.
+        # Use the earliest frame (pre-impact, ambient-lit) as reference so the
+        # flight frame-differencing has a clean background.
+        rest_position = (int(known_rest_position[0]), int(known_rest_position[1]))
+        rest_frame_idx = 0
+        print(f"[Metrics] Ball at rest (locked): {rest_position}")
+    else:
+        for i in range(min(10, len(frames))):
+            result = detect_ball_at_rest(frames[i])
+            if result:
+                rest_position = (result[0], result[1])
+                rest_frame_idx = i
+                break
 
-    if not rest_position:
-        print("[Metrics] Could not find ball at rest")
-        return {"error": "Could not detect ball at rest"}
+        if not rest_position:
+            print("[Metrics] Could not find ball at rest")
+            return {"error": "Could not detect ball at rest"}
 
-    print(f"[Metrics] Ball at rest: {rest_position} (frame {rest_frame_idx})")
+        print(f"[Metrics] Ball at rest: {rest_position} (frame {rest_frame_idx})")
+
     reference_frame = frames[rest_frame_idx]
 
     detections = []
@@ -672,6 +791,8 @@ def calculate_metrics(frames, meta):
         "carry_distance": round(carry_distance_yds, 1),
         "frames_analyzed": len(frames),
         "detections": len(detections),
+        "rest_x": int(rest_position[0]),
+        "rest_y": int(rest_position[1]),
     }
 
 
@@ -791,7 +912,10 @@ def _motion_process_shot():
                 phase = "pre" if i < PRE_TRIGGER_FRAMES else "post"
                 writer.writerow([i, m.get('timestamp_us', 0), phase])
 
-        metrics = calculate_metrics(frames, meta)
+        # Pass the locked rest position (latched when ball disappeared) so
+        # metric calc doesn't have to re-find it in strobe-lit frames.
+        rest_pos = capture_system.pre_swing_rest_position or capture_system.rest_position_locked
+        metrics = calculate_metrics(frames, meta, known_rest_position=rest_pos)
 
         # If real metrics failed, use placeholders so the web UI still updates
         if "error" in metrics:
@@ -855,7 +979,8 @@ def process_shot_manual(club_id: str) -> Dict[str, Any]:
     for i, frame in enumerate(frames):
         cv2.imwrite(str(out_dir / f"frame_{i:04d}.png"), frame)
 
-    metrics = calculate_metrics(frames, meta)
+    rest_pos = capture_system.pre_swing_rest_position or capture_system.rest_position_locked
+    metrics = calculate_metrics(frames, meta, known_rest_position=rest_pos)
 
     gui_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
     gui_metrics["shot_id"] = shot_id
@@ -1123,7 +1248,8 @@ def main():
     print("=" * 60)
     print()
     print(f"Web UI:    http://0.0.0.0:{FLASK_PORT}")
-    print(f"Camera:    {CAMERA_SIZE} @ {TARGET_FPS}fps, {EXPOSURE_US}us exposure")
+    print(f"Camera:    {CAMERA_SIZE} @ {TARGET_FPS}fps "
+          f"(detection {DETECTION_EXPOSURE_US}us / capture {CAPTURE_EXPOSURE_US}us)")
     print(f"Buffer:    {PRE_TRIGGER_FRAMES} pre + {POST_TRIGGER_FRAMES} post frames")
     print(f"Templates: {TEMPLATE_DIR}")
     print(f"Output:    {CAPTURE_OUTPUT_DIR}")
