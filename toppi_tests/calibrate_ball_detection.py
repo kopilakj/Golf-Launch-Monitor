@@ -37,6 +37,15 @@ from datetime import datetime
 import numpy as np
 import cv2
 
+# smbus2 is only needed to force the IR strobe OFF during calibration.
+# If it's not installed the script still runs, but the FSTROBE pin may pulse
+# in its hardware default if the strobe driver is wired up.
+try:
+    from smbus2 import SMBus, i2c_msg
+    SMBUS_AVAILABLE = True
+except ImportError:
+    SMBUS_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Camera / detection defaults (mirrored from single_pi_server.py)
 # ---------------------------------------------------------------------------
@@ -47,6 +56,12 @@ TARGET_FPS = 300
 EXPOSURE_US = 2000
 ANALOGUE_GAIN = 4.0
 BUFFER_COUNT = 4
+
+# IR strobe (OV9281 FSTROBE pin, controlled via I2C). Calibration never fires
+# the strobe — the shot-ready state in single_pi_server.py is the only place
+# that should arm it. We force it off here in case the hardware defaults on.
+OV9281_ADDR = 0x60
+STROBE_I2C_BUS = 10
 
 # Motion ROI (x, y, w, h)
 MOTION_ROI = (210, 270, 160, 40)
@@ -62,6 +77,24 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "calibration_output"
 
 
+def force_strobe_off():
+    """Put the OV9281 FSTROBE pin in software-controlled mode and drive it low.
+
+    Calibration should never see strobe light — if the FSTROBE wire is soldered
+    to a working strobe driver, the pin's default (hardware mode) will pulse
+    once per exposure and wash the scene out. This forces it off.
+    """
+    if not SMBUS_AVAILABLE:
+        return
+    try:
+        with SMBus(STROBE_I2C_BUS) as bus:
+            bus.i2c_rdwr(i2c_msg.write(OV9281_ADDR, [0x30, 0x06, 0x0C]))  # FSTROBE = output
+            bus.i2c_rdwr(i2c_msg.write(OV9281_ADDR, [0x30, 0x27, 0x08]))  # software control
+            bus.i2c_rdwr(i2c_msg.write(OV9281_ADDR, [0x30, 0x09, 0x00]))  # strobe OFF
+    except Exception as e:
+        print(f"[Calibration] Could not disable strobe (continuing): {e}")
+
+
 def capture_frame(exposure_us=EXPOSURE_US, gain=ANALOGUE_GAIN):
     """Capture a single raw frame from the camera."""
     from picamera2 import Picamera2
@@ -74,6 +107,9 @@ def capture_frame(exposure_us=EXPOSURE_US, gain=ANALOGUE_GAIN):
     cam.configure(config)
     cam.start()
     time.sleep(0.5)
+
+    # Disable strobe now that the sensor is powered and responding on I2C
+    force_strobe_off()
 
     frame_us = int(1_000_000 / TARGET_FPS)
     cam.set_controls({
@@ -342,6 +378,7 @@ def main():
         cam.configure(config)
         cam.start()
         time.sleep(0.5)
+        force_strobe_off()
         frame_us = int(1_000_000 / TARGET_FPS)
         cam.set_controls({
             "FrameDurationLimits": (frame_us, frame_us),
