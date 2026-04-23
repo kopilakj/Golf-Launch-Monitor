@@ -63,14 +63,15 @@ CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 400
 CAMERA_SIZE = (CAPTURE_WIDTH, CAPTURE_HEIGHT)
 TARGET_FPS = 300
-# Two exposure modes — switched live based on ball state:
-#   DETECTION_EXPOSURE_US: long exposure for finding the ball in ambient light
-#                          (used while state is waiting/stabilizing, strobe off)
-#   CAPTURE_EXPOSURE_US:   short exposure for strobe-lit frames during a swing
-#                          (used once ball reaches ready state, strobe armed)
+# Two capture modes — switched live based on ball state:
+#   DETECTION: finding the ball in ambient light (waiting/stabilizing, strobe off)
+#   CAPTURE:   strobe-lit frames during a swing (ready onward, strobe armed)
+# Gain is bumped up for CAPTURE mode because the 200us exposure + IR strobe
+# pulse needs more amplification than the ambient 300us detection frame.
 DETECTION_EXPOSURE_US = 300
+DETECTION_GAIN = 4.0
 CAPTURE_EXPOSURE_US = 200
-ANALOGUE_GAIN = 8.0
+CAPTURE_GAIN = 8.0
 BUFFER_COUNT = 4
 
 # Circular buffer
@@ -205,6 +206,7 @@ class CaptureSystem:
             self.strobe_off_msg = i2c_msg.write(0x60, [0x30, 0x09, 0x00])
         self.strobe_armed = False
         self.current_exposure_us = DETECTION_EXPOSURE_US
+        self.current_gain = DETECTION_GAIN
 
     def setup_camera(self) -> bool:
         try:
@@ -220,13 +222,14 @@ class CaptureSystem:
 
             frame_us = int(1_000_000 / TARGET_FPS)
             self.current_exposure_us = DETECTION_EXPOSURE_US
+            self.current_gain = DETECTION_GAIN
             self.camera.set_controls({
                 "FrameDurationLimits": (frame_us, frame_us),
                 "ExposureTime": self.current_exposure_us,
-                "AnalogueGain": ANALOGUE_GAIN,
+                "AnalogueGain": self.current_gain,
             })
             print(f"[Capture] Camera ready: {CAMERA_SIZE} @ {TARGET_FPS}fps "
-                  f"(detection exposure {DETECTION_EXPOSURE_US}us)")
+                  f"(detection: {DETECTION_EXPOSURE_US}us / gain {DETECTION_GAIN})")
 
             # Initialize IR strobe via I2C (graceful fallback if not present)
             if SMBUS_AVAILABLE:
@@ -268,16 +271,22 @@ class CaptureSystem:
 
     # ---- Exposure + Strobe control ----
 
-    def set_exposure(self, exposure_us: int):
-        """Switch camera exposure live. Safe to call from the capture thread."""
-        if self.camera is None or exposure_us == self.current_exposure_us:
+    def set_capture_mode(self, exposure_us: int, gain: float):
+        """Switch camera exposure + gain live. Safe to call from the capture thread."""
+        if self.camera is None:
+            return
+        if exposure_us == self.current_exposure_us and gain == self.current_gain:
             return
         try:
-            self.camera.set_controls({"ExposureTime": exposure_us})
+            self.camera.set_controls({
+                "ExposureTime": exposure_us,
+                "AnalogueGain": gain,
+            })
             self.current_exposure_us = exposure_us
-            print(f"[Capture] Exposure -> {exposure_us}us")
+            self.current_gain = gain
+            print(f"[Capture] Mode -> {exposure_us}us / gain {gain}")
         except Exception as e:
-            print(f"[Capture] Failed to set exposure {exposure_us}us: {e}")
+            print(f"[Capture] Failed to set mode {exposure_us}us/{gain}: {e}")
 
     def arm_strobe(self):
         """Turn IR strobe on. Called when ball reaches ready state."""
@@ -315,7 +324,7 @@ class CaptureSystem:
         self.pre_swing_rest_position = None
         # Drop back to ambient ball-hunting mode
         self.disarm_strobe()
-        self.set_exposure(DETECTION_EXPOSURE_US)
+        self.set_capture_mode(DETECTION_EXPOSURE_US, DETECTION_GAIN)
 
     def check_ball_state(self, frame: np.ndarray) -> bool:
         """
@@ -359,7 +368,7 @@ class CaptureSystem:
                     # starting point for metric calculation
                     self.rest_position_locked = self.ball_position
                     # Ball locked in — switch camera to strobe-lit capture mode
-                    self.set_exposure(CAPTURE_EXPOSURE_US)
+                    self.set_capture_mode(CAPTURE_EXPOSURE_US, CAPTURE_GAIN)
                     self.arm_strobe()
                     print(f"[Ball] ======= READY FOR SWING at {self.rest_position_locked} =======")
             else:
@@ -414,7 +423,7 @@ class CaptureSystem:
     def disable_motion(self):
         self.motion_enabled.clear()
         self.disarm_strobe()
-        self.set_exposure(DETECTION_EXPOSURE_US)
+        self.set_capture_mode(DETECTION_EXPOSURE_US, DETECTION_GAIN)
         print("[Motion] Disabled")
 
     # ---- Capture Loop ----
@@ -1249,7 +1258,8 @@ def main():
     print()
     print(f"Web UI:    http://0.0.0.0:{FLASK_PORT}")
     print(f"Camera:    {CAMERA_SIZE} @ {TARGET_FPS}fps "
-          f"(detection {DETECTION_EXPOSURE_US}us / capture {CAPTURE_EXPOSURE_US}us)")
+          f"(detection {DETECTION_EXPOSURE_US}us/g{DETECTION_GAIN} "
+          f"/ capture {CAPTURE_EXPOSURE_US}us/g{CAPTURE_GAIN})")
     print(f"Buffer:    {PRE_TRIGGER_FRAMES} pre + {POST_TRIGGER_FRAMES} post frames")
     print(f"Templates: {TEMPLATE_DIR}")
     print(f"Output:    {CAPTURE_OUTPUT_DIR}")
