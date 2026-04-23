@@ -15,8 +15,8 @@ import cv2
 # ---------- Camera settings ----------
 WIDTH, HEIGHT = 640, 400
 TARGET_FPS = 300
-EXPOSURE_US = 500
-ANALOGUE_GAIN = 4.0
+EXPOSURE_US = 200
+ANALOGUE_GAIN = 8.0
 BUFFER_COUNT = 4
 
 # ---------- Strobe (OV9281 I2C) ----------

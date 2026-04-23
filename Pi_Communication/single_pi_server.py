@@ -68,9 +68,9 @@ TARGET_FPS = 300
 #                          (used while state is waiting/stabilizing, strobe off)
 #   CAPTURE_EXPOSURE_US:   short exposure for strobe-lit frames during a swing
 #                          (used once ball reaches ready state, strobe armed)
-DETECTION_EXPOSURE_US = 2000
-CAPTURE_EXPOSURE_US = 500
-ANALOGUE_GAIN = 4.0
+DETECTION_EXPOSURE_US = 300
+CAPTURE_EXPOSURE_US = 200
+ANALOGUE_GAIN = 8.0
 BUFFER_COUNT = 4
 
 # Circular buffer
