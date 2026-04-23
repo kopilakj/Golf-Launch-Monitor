@@ -627,7 +627,8 @@ def detect_ball_at_rest(frame):
 
 
 def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
-                          roi_center=None, roi_half=ROI_FLIGHT_HALF):
+                          roi_center=None, roi_half=ROI_FLIGHT_HALF,
+                          min_x=None, max_y=None):
     gray_curr = current_frame if len(current_frame.shape) == 2 else cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
     gray_ref = reference_frame if len(reference_frame.shape) == 2 else cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
 
@@ -654,6 +655,10 @@ def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
             bbox_w, bbox_h = features['bbox'][2], features['bbox'][3]
             aspect = max(bbox_w, bbox_h) / max(1, min(bbox_w, bbox_h))
             if aspect > 3.0:
+                continue
+            if min_x is not None and features['cx'] < min_x:
+                continue
+            if max_y is not None and features['cy'] > max_y:
                 continue
             score = features['circularity'] * 100
             if prev_position:
@@ -719,8 +724,23 @@ def calculate_metrics(frames, meta, known_rest_position=None):
             ball_departed = True
             print(f"[Metrics] Ball departed at frame {i}")
 
+        # Ball must move rightward — reject anything left of rest (first detection)
+        # or left of the previous accepted detection (with small jitter tolerance).
+        if not detections:
+            min_x = rest_position[0] + 2
+        else:
+            min_x = detections[-1]['x'] - 3
+        # Once ascending (y decreasing in image coords), reject any detection
+        # that would descend past the last y. Allow small noise tolerance.
+        max_y = None
+        if len(detections) >= 2:
+            prev_dy = detections[-1]['y'] - detections[-2]['y']
+            if prev_dy < -3:
+                max_y = detections[-1]['y'] + 3
+
         pos = detect_ball_in_flight(frames[i], reference_frame, prev_pos,
-                                    roi_center=roi_center, roi_half=roi_half)
+                                    roi_center=roi_center, roi_half=roi_half,
+                                    min_x=min_x, max_y=max_y)
         if pos:
             dist_from_rest = np.sqrt((pos[0] - rest_position[0]) ** 2 +
                                      (pos[1] - rest_position[1]) ** 2)
@@ -730,12 +750,30 @@ def calculate_metrics(frames, meta, known_rest_position=None):
                     'timestamp_us': meta[i].get('timestamp_us', 0)
                 })
                 prev_pos = pos
-                roi_center = pos
+                # Predictive ROI: project next position from last velocity once
+                # we have 2+ detections. Before that, track the last position.
+                if len(detections) >= 2:
+                    last, prev = detections[-1], detections[-2]
+                    vx = last['x'] - prev['x']
+                    vy = last['y'] - prev['y']
+                    roi_center = (last['x'] + vx, last['y'] + vy)
+                else:
+                    roi_center = pos
                 roi_half = ROI_FLIGHT_HALF
                 frames_missed = 0
                 if pos[0] > 620 or pos[1] < 20 or pos[0] < 20:
                     break
                 continue
+            else:
+                print(f"[Metrics] Frame {i}: candidate {pos} rejected (too close to rest, d={dist_from_rest:.1f})")
+        else:
+            constraint_tag = []
+            if min_x is not None:
+                constraint_tag.append(f"min_x={min_x}")
+            if max_y is not None:
+                constraint_tag.append(f"max_y={max_y}")
+            tag = (" [" + ", ".join(constraint_tag) + "]") if constraint_tag else ""
+            print(f"[Metrics] Frame {i}: no candidate passed filters{tag}")
 
         frames_missed += 1
         roi_half = min(roi_half + ROI_GROWTH_PER_MISS, ROI_MAX_HALF)
@@ -862,6 +900,7 @@ def generate_debug_overlays(frames, meta, metrics, out_dir):
     CYAN      = (255, 255, 0)     # pre-trigger phase label
     WHITE     = (255, 255, 255)
     LIGHT_BLUE = (255, 200, 100)  # per-frame "ball is tracked" marker
+    ORANGE    = (0, 140, 255)     # predicted search ROI for next frame
 
     # Pre-compute a reference frame for flight-detection visualization.
     # Use the first frame (pre-impact, ambient-lit) — same as calculate_metrics.
@@ -875,6 +914,32 @@ def generate_debug_overlays(frames, meta, metrics, out_dir):
         # Locked rest position (dark blue, large)
         if rest_position:
             cv2.circle(overlay, rest_position, 20, BLUE, 2)
+
+        # Predicted search ROI for this frame (orange box) — mirrors the
+        # roi_center / roi_half that calculate_metrics would have used when
+        # searching frame i. Only show post-trigger.
+        if rest_position and i >= PRE_TRIGGER_FRAMES:
+            past_dets = [d for d in detections if d['frame_idx'] < i]
+            if len(past_dets) >= 2:
+                last, prev = past_dets[-1], past_dets[-2]
+                vx = last['x'] - prev['x']
+                vy = last['y'] - prev['y']
+                roi_cx = last['x'] + vx
+                roi_cy = last['y'] + vy
+                roi_label = "pred"
+            elif len(past_dets) == 1:
+                roi_cx = past_dets[-1]['x']
+                roi_cy = past_dets[-1]['y']
+                roi_label = "last"
+            else:
+                roi_cx, roi_cy = rest_position
+                roi_label = "rest"
+            rh = ROI_FLIGHT_HALF
+            x1 = max(0, roi_cx - rh); y1 = max(0, roi_cy - rh)
+            x2 = min(overlay.shape[1] - 1, roi_cx + rh); y2 = min(overlay.shape[0] - 1, roi_cy + rh)
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), ORANGE, 1)
+            cv2.putText(overlay, f"ROI:{roi_label}", (x1 + 2, y1 + 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, ORANGE, 1)
 
         # --- Per-frame tracking indicator (light blue) ---
         # Try ball-at-rest detector first; if that misses and this frame has
