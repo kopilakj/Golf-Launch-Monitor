@@ -14,48 +14,49 @@
 
         h1 {
             font-size: 48px;
-            margin-bottom: 10px;
+            margin-bottom: 5px;
             color: white;
         }
 
         h2 {
-            font-size: 28px;
-            color: #7ED957;
-            margin-bottom: 40px;
+            font-size: 30px;
+            color: #cfe9ff;
+            margin-top: 1px;
+            margin-bottom: 30px;
         }
 
         .metrics-container {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 20px;
+            gap: 25px;
             max-width: 800px;
             margin: auto;
         }
 
         .metric-card {
             background-color: #16213e;
-            padding: 25px;
-            border-radius: 12px;
+            padding: 22px;
+            border-radius: 18px;
             box-shadow: 0px 4px 10px rgba(0,0,0,0.4);
-            border: 1px solid #0f3460;
+            border: 1px solid #0f3460;   
         }
 
         .metric-title {
-            font-size: 16px;
-            color: #7ED957;
+            font-size: 22px;
+            color: cyan;
             text-transform: uppercase;
             letter-spacing: 1px;
         }
 
         .metric-value {
-            font-size: 42px;
+            font-size: 45px;
             font-weight: bold;
-            color: white;
+            color: #cfe9ff;
             margin-top: 10px;
         }
 
         .metric-unit {
-            font-size: 14px;
+            font-size: 18px;
             color: #888;
             margin-top: 5px;
         }
@@ -67,13 +68,13 @@
         .nav-btn {
             padding: 12px 25px;
             font-size: 16px;
-            border: none;
-            border-radius: 8px;
-            background-color: #0f3460;
-            color: #7ED957;
-            cursor: pointer;
             margin: 10px;
-            transition: background-color 0.3s;
+            background: var(--card);
+            border: 1px solid rgba(58,160,255,0.4);
+            color: var(--cyan);
+            border-radius: 8px;
+            box-shadow: 0 0 12px rgba(58,160,255,0.3);
+            transition: 0.2s;
         }
 
         .nav-btn:hover {
@@ -81,16 +82,24 @@
         }
 
         .motion-container {
-            margin: 30px auto;
-            padding: 25px;
+            margin: 50px auto;
+            margin-top: 10px;
+            padding: 40px;
+            gap: 30px;
             background-color: #16213e;
+            max-width: 700px;
             border-radius: 12px;
-            max-width: 500px;
-            border: 1px solid #0f3460;
+            border: 1px solid rgba(58,160,255,0.4);
+
+            box-shadow: 
+                0 0 10px rgba(58,160,255,0.3),
+                0 0 20px rgba(122,92,255,0.15);
+
+            animation: glowPulse 5.5s infinite;
         }
 
         .motion-title {
-            font-size: 14px;
+            font-size: 18px;
             color: #888;
             text-transform: uppercase;
             letter-spacing: 1px;
@@ -157,12 +166,17 @@
             display: none;
             margin: 20px auto;
             padding: 15px 30px;
-            background-color: #7ED957;
-            color: #1a1a2e;
-            font-size: 20px;
+            font-size: 22px;
             font-weight: bold;
             border-radius: 8px;
             max-width: 500px;
+
+            color: #0b1020;
+            background: linear-gradient(135deg, #7ED957, #3aa0ff);
+            box-shadow:
+                0 0 15px rgba(126, 217, 87, 0.35),
+                0 10px 25px rgba(0,0,0,0.3);
+            transform: translateY(-10px);
         }
 
         .new-shot-banner.visible { display: block; }
@@ -205,7 +219,7 @@
                     {% endif %}
                 {% endfor %}
             {% else %}
-                <p id="noMetrics" style="grid-column: 1 / -1; color: #aaa; font-size: 18px;">
+                <p id="noMetrics" class="label" style="grid-column: 1 / -1;">
                     No metrics yet. Waiting for a swing...
                 </p>
             {% endif %}
@@ -306,6 +320,30 @@
             })
             .catch(() => {});
         }
+        function animateValue(element, start, end, duration) {
+            if (isNaN(end)) {
+                element.textContent = end;
+                return;
+            }
+
+            let startTime = null;
+
+            function update(currentTime) {
+                if (!startTime) startTime = currentTime;
+                const progress = Math.min((currentTime - startTime) / duration, 1);
+                const value = (progress * (end - start) + start).toFixed(1);
+
+                element.textContent = value;
+
+                if (progress < 1) {
+                    requestAnimationFrame(update);
+                } else {
+                    element.textContent = end;
+                }
+            }
+
+            requestAnimationFrame(update);
+        }
 
         function renderMetrics(metrics) {
             const container = document.getElementById('metricsContainer');
@@ -316,6 +354,7 @@
 
                 const card = document.createElement('div');
                 card.className = 'metric-card';
+                card.style.animation = "fadeIn 0.3s ease";
 
                 const title = document.createElement('div');
                 title.className = 'metric-title';
@@ -324,7 +363,7 @@
 
                 const val = document.createElement('div');
                 val.className = 'metric-value';
-                val.textContent = value;
+                animateValue(val, 0, parseFloat(value), 800);
                 card.appendChild(val);
 
                 if (UNIT_MAP[key]) {
