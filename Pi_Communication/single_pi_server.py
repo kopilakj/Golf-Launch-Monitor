@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import json
+import socket
 import sqlite3
 import traceback
 import csv as csv_module
@@ -1499,13 +1500,31 @@ def api_status():
 # MAIN
 # =============================================================================
 
+def get_lan_ip() -> str:
+    """Return the Pi's primary outbound LAN IP (not 127.0.0.1, not 0.0.0.0).
+    Opens a UDP socket to a routable address; no packets are sent -- the OS
+    just picks the correct outbound interface so we can read its address."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 def main():
+    lan_ip = get_lan_ip()
+
     print()
     print("=" * 60)
     print("GOLF LAUNCH MONITOR — SINGLE PI MODE")
     print("=" * 60)
     print()
-    print(f"Web UI:    http://0.0.0.0:{FLASK_PORT}")
+    print(f"Open in a browser on this Pi:     http://localhost:{FLASK_PORT}")
+    print(f"Open from another device on LAN:  http://{lan_ip}:{FLASK_PORT}")
+    print()
     print(f"Camera:    {CAMERA_SIZE} @ {TARGET_FPS}fps "
           f"(detection {DETECTION_EXPOSURE_US}us/g{DETECTION_GAIN} "
           f"/ capture {CAPTURE_EXPOSURE_US}us/g{CAPTURE_GAIN})")
