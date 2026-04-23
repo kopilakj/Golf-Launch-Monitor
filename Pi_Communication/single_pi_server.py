@@ -802,6 +802,11 @@ def calculate_metrics(frames, meta, known_rest_position=None):
         "detections": len(detections),
         "rest_x": int(rest_position[0]),
         "rest_y": int(rest_position[1]),
+        # Underscore-prefixed keys are stripped before sending to the GUI
+        # (see _motion_process_shot) but are needed by debug overlay generation.
+        "_rest_position": rest_position,
+        "_detections": detections,
+        "_known_rest": known_rest_position is not None,
     }
 
 
@@ -848,32 +853,73 @@ def generate_debug_overlays(frames, meta, metrics, out_dir):
     rest_position = metrics.get("_rest_position")
     detections = metrics.get("_detections", [])
     detection_by_frame = {d['frame_idx']: d for d in detections}
+    known_rest = metrics.get("_known_rest", False)
 
-    GREEN, BLUE, YELLOW, CYAN, WHITE = (
-        (0, 255, 0), (255, 0, 0), (0, 255, 255), (255, 255, 0), (255, 255, 255)
-    )
+    # BGR color tuples
+    GREEN     = (0, 255, 0)       # accepted flight detection
+    BLUE      = (255, 0, 0)       # locked rest position
+    YELLOW    = (0, 255, 255)     # post-trigger phase label
+    CYAN      = (255, 255, 0)     # pre-trigger phase label
+    WHITE     = (255, 255, 255)
+    LIGHT_BLUE = (255, 200, 100)  # per-frame "ball is tracked" marker
+
+    # Pre-compute a reference frame for flight-detection visualization.
+    # Use the first frame (pre-impact, ambient-lit) — same as calculate_metrics.
+    reference_frame = frames[0] if frames else None
 
     for i, frame in enumerate(frames):
         overlay = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR) if len(frame.shape) == 2 else frame.copy()
         phase = "pre" if i < PRE_TRIGGER_FRAMES else "post"
         phase_color = CYAN if i < PRE_TRIGGER_FRAMES else YELLOW
 
+        # Locked rest position (dark blue, large)
         if rest_position:
             cv2.circle(overlay, rest_position, 20, BLUE, 2)
 
+        # --- Per-frame tracking indicator (light blue) ---
+        # Try ball-at-rest detector first; if that misses and this frame has
+        # an accepted flight detection, use that instead. No circle = no track.
+        tracked_pos = None
+        rest_det = detect_ball_at_rest(frame)
+        if rest_det:
+            tracked_pos = (rest_det[0], rest_det[1])
+        elif i in detection_by_frame:
+            det = detection_by_frame[i]
+            tracked_pos = (det['x'], det['y'])
+        elif reference_frame is not None and i >= PRE_TRIGGER_FRAMES:
+            # Try flight detector for frames between trigger and first accepted detection
+            flt = detect_ball_in_flight(frame, reference_frame, rest_position,
+                                        roi_center=rest_position, roi_half=ROI_FLIGHT_HALF)
+            if flt:
+                tracked_pos = flt
+
+        if tracked_pos:
+            cv2.circle(overlay, tracked_pos, 12, LIGHT_BLUE, 2)
+            cv2.circle(overlay, tracked_pos, 2, LIGHT_BLUE, -1)
+            cv2.putText(overlay, "TRACKED",
+                        (tracked_pos[0] + 15, tracked_pos[1] - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, LIGHT_BLUE, 1)
+        else:
+            cv2.putText(overlay, "no track", (10, overlay.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (80, 80, 200), 1)
+
+        # Accepted flight-path line (green)
         past_dets = [d for d in detections if d['frame_idx'] <= i]
         if len(past_dets) > 1:
             pts = [(d['x'], d['y']) for d in past_dets]
             for j in range(1, len(pts)):
                 cv2.line(overlay, pts[j - 1], pts[j], GREEN, 2)
 
+        # Current accepted flight detection (green ring + dot)
         if i in detection_by_frame:
             det = detection_by_frame[i]
             cv2.circle(overlay, (det['x'], det['y']), 15, GREEN, 2)
             cv2.circle(overlay, (det['x'], det['y']), 4, GREEN, -1)
 
+        # Header bar
         cv2.rectangle(overlay, (0, 0), (overlay.shape[1], 35), (30, 30, 30), -1)
-        cv2.putText(overlay, f"Frame {i:02d} | {phase.upper()}", (10, 15),
+        lock_tag = " [locked]" if known_rest else ""
+        cv2.putText(overlay, f"Frame {i:02d} | {phase.upper()}{lock_tag}", (10, 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, phase_color, 1)
 
         if "ball_speed" in metrics:
