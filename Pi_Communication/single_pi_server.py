@@ -139,7 +139,7 @@ ROI_MAX_HALF = 80
 
 # Ball-vs-club discrimination and fit trust thresholds
 MAX_VALID_DETECTIONS = 20        # more than this = club head, not ball
-MIN_DETECTIONS_FOR_ANGLE = 5     # polyfit on fewer points is too noisy
+MIN_DETECTIONS_FOR_ANGLE = 3     # polyfit on fewer points is too noisy
 MIN_ASCENT_PX = 15               # track must rise this far above rest_y
 MIN_EARLY_ASCENT_PX = 5          # ball must rise by frame 3
 RETURN_TO_REST_PX = 30           # detection inside this radius = whiff
@@ -1112,10 +1112,16 @@ def generate_debug_overlays(frames, meta, metrics, out_dir):
         cv2.putText(overlay, f"Frame {i:02d} | {phase.upper()}{lock_tag}", (10, 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, phase_color, 1)
 
+        parts = []
         if "ball_speed" in metrics:
-            txt = (f"Speed: {metrics['ball_speed']} mph | Angle: {metrics['launch_angle']} deg "
-                   f"| Carry: {metrics['carry_distance']} yds")
-            cv2.putText(overlay, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.35, WHITE, 1)
+            parts.append(f"Speed: {metrics['ball_speed']} mph")
+        if "launch_angle" in metrics:
+            parts.append(f"Angle: {metrics['launch_angle']} deg")
+        if "carry_distance" in metrics:
+            parts.append(f"Carry: {metrics['carry_distance']} yds")
+        if parts:
+            cv2.putText(overlay, " | ".join(parts), (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, WHITE, 1)
 
         cv2.imwrite(str(debug_dir / f"debug_{i:04d}.png"), overlay)
 
