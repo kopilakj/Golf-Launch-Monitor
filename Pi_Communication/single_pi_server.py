@@ -131,7 +131,7 @@ MAX_BALL_AREA_REST = 500
 MIN_BALL_AREA_FLIGHT = 15
 MAX_BALL_AREA_FLIGHT = 400
 MIN_CIRCULARITY_REST = 0.4
-MIN_CIRCULARITY_FLIGHT = 0.35
+MIN_CIRCULARITY_FLIGHT = 0.55
 # Ball rest detection uses MOTION_ROI directly — no separate search area
 ROI_FLIGHT_HALF = 40
 ROI_GROWTH_PER_MISS = 10
@@ -147,6 +147,22 @@ BALLISTIC_OUTLIER_PX = 25        # reject detections this far from prediction
 SPEED_JUMP_RATIO_MAX = 2.5       # reject if speed jumps > 2.5x
 SPEED_JUMP_RATIO_MIN = 0.3       # or drops below 0.3x
 ABSOLUTE_MAX_BALL_MPH = 230      # physical ceiling (driver ~200)
+
+# Stricter gates for detection #1 (first post-departure frame).
+# Right after impact, the clubface/hosel is bright and sits near the ball's
+# rest position while the real ball has already flown out far to the right.
+MIN_FIRST_DETECTION_DX = 25       # detection #1 must be this far right of rest
+MAX_FIRST_DETECTION_AREA = 180    # caps clubface-glint blobs
+FIRST_DETECTION_MAX_DY = 5        # must be at or above rest-y (no below-ground)
+
+# Discriminators applied to every in-flight candidate
+INTENSITY_STD_MAX = 55            # specular clubface glints produce high pixel std
+TEMPLATE_PATCH_HALF = 16          # 33x33 patch around ball-at-rest for NCC match
+TEMPLATE_MATCH_MIN_FIRST = 0.30   # NCC hard gate on detection #1
+CIRCULARITY_BONUS_THRESHOLD = 0.75  # score bonus when above this
+
+# In-loop returned-to-rest abort (catches club drift earlier than post-loop)
+IN_LOOP_RETURN_TO_REST_PX = 25
 
 # Per-club expected top speeds (mph) — used as upper sanity cap = range_max * 1.3
 EXPECTED_SPEED_MAX_MPH = {
@@ -604,6 +620,7 @@ def get_contour_features(contour, gray_frame=None) -> dict:
     x, y, w, h = cv2.boundingRect(contour)
 
     brightness = 0
+    intensity_std = 0.0
     cx_sub, cy_sub = float(cx), float(cy)
     if gray_frame is not None:
         mask = np.zeros(gray_frame.shape, dtype=np.uint8)
@@ -614,6 +631,7 @@ def get_contour_features(contour, gray_frame=None) -> dict:
         ys_px, xs_px = np.where(mask > 0)
         if len(xs_px) > 0:
             I = gray_frame[ys_px, xs_px].astype(np.float64)
+            intensity_std = float(I.std())
             tot = I.sum()
             if tot > 0:
                 cx_sub = float((xs_px * I).sum() / tot)
@@ -624,7 +642,8 @@ def get_contour_features(contour, gray_frame=None) -> dict:
         'cx': cx, 'cy': cy,
         'cx_sub': cx_sub, 'cy_sub': cy_sub,
         'bbox': (x, y, w, h),
-        'brightness': brightness
+        'brightness': brightness,
+        'intensity_std': intensity_std,
     }
 
 
@@ -669,11 +688,39 @@ def detect_ball_at_rest(frame):
     return best_candidate
 
 
+def _template_ncc(gray, cx, cy, template):
+    """Return normalized cross-correlation between a patch of `gray` centered
+    on (cx, cy) and `template`. Returns 0.0 if the patch would be clipped."""
+    if template is None:
+        return None
+    th, tw = template.shape
+    hy, hx = th // 2, tw // 2
+    cxi, cyi = int(cx), int(cy)
+    y1, y2 = cyi - hy, cyi - hy + th
+    x1, x2 = cxi - hx, cxi - hx + tw
+    if y1 < 0 or x1 < 0 or y2 > gray.shape[0] or x2 > gray.shape[1]:
+        return 0.0
+    patch = gray[y1:y2, x1:x2]
+    if patch.shape != template.shape:
+        return 0.0
+    res = cv2.matchTemplate(patch, template, cv2.TM_CCOEFF_NORMED)
+    return float(res[0, 0])
+
+
 def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
                           roi_center=None, roi_half=ROI_FLIGHT_HALF,
-                          min_x=None, max_y=None, top_n=1):
+                          min_x=None, max_y=None, top_n=1,
+                          max_area=None, ball_template=None,
+                          template_min_score=None):
     """Returns (cx_sub, cy_sub) sub-pixel floats when top_n=1, else a list of
-    up to top_n such tuples sorted by score descending (best first)."""
+    up to top_n such tuples sorted by score descending (best first).
+
+    Discriminators beyond basic geometry:
+      * intensity_std cap — specular clubface glints have high pixel variance.
+      * optional NCC match against a ball template extracted at rest — ball
+        correlates strongly with its own prior appearance, clubface does not.
+      * optional hard area cap for first-detection calls.
+    """
     gray_curr = current_frame if len(current_frame.shape) == 2 else cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
     gray_ref = reference_frame if len(reference_frame.shape) == 2 else cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
 
@@ -696,6 +743,8 @@ def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
             features = get_contour_features(contour, gray_curr)
             if not (MIN_BALL_AREA_FLIGHT < features['area'] < MAX_BALL_AREA_FLIGHT):
                 continue
+            if max_area is not None and features['area'] > max_area:
+                continue
             if features['circularity'] < MIN_CIRCULARITY_FLIGHT:
                 continue
             bbox_w, bbox_h = features['bbox'][2], features['bbox'][3]
@@ -706,7 +755,20 @@ def detect_ball_in_flight(current_frame, reference_frame, prev_position=None,
                 continue
             if max_y is not None and features['cy_sub'] > max_y:
                 continue
+            # Specular-glint filter: clubface reflections have very high std of
+            # pixel intensity inside the contour; a diffuse ball is more uniform.
+            if features['intensity_std'] > INTENSITY_STD_MAX:
+                continue
+            # Template match: if we have a ball template and a minimum NCC is
+            # set, reject candidates that don't look like the ball at rest.
+            ncc = _template_ncc(gray_curr, features['cx_sub'], features['cy_sub'], ball_template)
+            if template_min_score is not None and ncc is not None and ncc < template_min_score:
+                continue
             score = features['circularity'] * 100
+            if features['circularity'] > CIRCULARITY_BONUS_THRESHOLD:
+                score += 50
+            if ncc is not None:
+                score += ncc * 60
             if prev_position:
                 dy = features['cy_sub'] - prev_position[1]
                 if dy < 0:
@@ -751,6 +813,20 @@ def calculate_metrics(frames, meta, known_rest_position=None, club_id=None):
 
     reference_frame = frames[rest_frame_idx]
 
+    # Extract a ball template from the rest frame for NCC matching. Used to
+    # tell the real ball apart from clubface/hosel glints that appear in the
+    # same diff-pass. If extraction clips at the frame edge, skip template.
+    gray_ref_for_template = reference_frame if len(reference_frame.shape) == 2 else cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
+    H = TEMPLATE_PATCH_HALF
+    ry_t, rx_t = int(rest_position[1]), int(rest_position[0])
+    if (ry_t - H >= 0 and rx_t - H >= 0 and
+            ry_t + H + 1 <= gray_ref_for_template.shape[0] and
+            rx_t + H + 1 <= gray_ref_for_template.shape[1]):
+        ball_template = gray_ref_for_template[ry_t - H:ry_t + H + 1,
+                                              rx_t - H:rx_t + H + 1].copy()
+    else:
+        ball_template = None
+
     detections = []
     prev_pos = rest_position
     roi_center = rest_position
@@ -773,15 +849,30 @@ def calculate_metrics(frames, meta, known_rest_position=None, club_id=None):
 
         # Directional constraints passed into the detector so noise blobs that
         # would violate them never beat the real ball on score.
-        if not detections:
-            min_x = rest_position[0] + 2
+        is_first_detection = not detections
+        if is_first_detection:
+            # Strict first-detection gate: must be clearly right of rest and
+            # at/above rest_y. Clubface glints near the rest position fail.
+            min_x = rest_position[0] + MIN_FIRST_DETECTION_DX
+            max_y = rest_position[1] + FIRST_DETECTION_MAX_DY
+            # Search the full right half of the frame, not a 40px ROI around
+            # rest — a fast ball has already moved beyond ROI_FLIGHT_HALF on
+            # the first post-departure frame, while the club hasn't.
+            first_roi_center = None
+            first_roi_half = 0
+            first_max_area = MAX_FIRST_DETECTION_AREA
+            first_template_min = TEMPLATE_MATCH_MIN_FIRST if ball_template is not None else None
         else:
             min_x = detections[-1]['x_sub'] - 3
-        max_y = None
-        if len(detections) >= 2:
-            prev_dy = detections[-1]['y_sub'] - detections[-2]['y_sub']
-            if prev_dy < -3:
-                max_y = detections[-1]['y_sub'] + 3
+            max_y = None
+            if len(detections) >= 2:
+                prev_dy = detections[-1]['y_sub'] - detections[-2]['y_sub']
+                if prev_dy < -3:
+                    max_y = detections[-1]['y_sub'] + 3
+            first_roi_center = roi_center
+            first_roi_half = roi_half
+            first_max_area = None
+            first_template_min = None
 
         # Predict where the ball should be in this frame, if we have history.
         predicted_pos = None
@@ -795,8 +886,10 @@ def calculate_metrics(frames, meta, known_rest_position=None, club_id=None):
         # nearest our ballistic prediction) instead of blindly trusting score.
         candidates = detect_ball_in_flight(
             frames[i], reference_frame, prev_pos,
-            roi_center=roi_center, roi_half=roi_half,
-            min_x=min_x, max_y=max_y, top_n=3)
+            roi_center=first_roi_center, roi_half=first_roi_half,
+            min_x=min_x, max_y=max_y, top_n=3,
+            max_area=first_max_area, ball_template=ball_template,
+            template_min_score=first_template_min)
 
         pos = None
         if candidates:
@@ -837,6 +930,13 @@ def calculate_metrics(frames, meta, known_rest_position=None, club_id=None):
                     'timestamp_us': meta[i].get('timestamp_us', 0)
                 })
                 prev_pos = pos
+                # In-loop drift-back check: if the track wanders back near the
+                # rest position after detection #3, abort — it's almost
+                # certainly following the club through the ball area.
+                if len(detections) >= 3 and dist_from_rest < IN_LOOP_RETURN_TO_REST_PX:
+                    print(f"[Metrics] Frame {i}: track drifted back near rest "
+                          f"(d={dist_from_rest:.1f}) — aborting as club track")
+                    break
                 # Predictive ROI for next frame.
                 if len(detections) >= 2:
                     last, prev = detections[-1], detections[-2]
