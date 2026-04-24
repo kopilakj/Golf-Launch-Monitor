@@ -78,7 +78,7 @@ TARGET_FPS = 300
 #   CAPTURE:   strobe-lit frames during a swing (ready onward, strobe armed)
 # Gain is bumped up for CAPTURE mode because the 200us exposure + IR strobe
 # pulse needs more amplification than the ambient 300us detection frame.
-DETECTION_EXPOSURE_US = 300
+DETECTION_EXPOSURE_US = 600
 DETECTION_GAIN = 4.0
 CAPTURE_EXPOSURE_US = 200
 CAPTURE_GAIN = 8.0

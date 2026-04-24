@@ -5,8 +5,8 @@ from picamera2 import Picamera2
 
 SIZE = (640, 400)
 TARGET_FPS = 300
-EXPOSURE_US = 200
-ANALOGUE_GAIN = 8.0
+EXPOSURE_US = 100
+ANALOGUE_GAIN = 4.0
 BUFFER_COUNT = 4
 SAVE_PATH = Path(__file__).resolve().parent / "pov_test.png"
 def main():

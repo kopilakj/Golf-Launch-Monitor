@@ -1,0 +1,11 @@
+metric,value,unit
+frames_analyzed,65,
+detections,10,
+rest_x,281,
+rest_y,288,
+ball_speed,32.0,
+launch_angle,11.4,
+apex_height,1.3,
+carry_distance,8.6,
+shot_id,shot_20260424_140641,
+club_id,9iron,
